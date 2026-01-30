@@ -1,4 +1,7 @@
 # 🚀 Smart Job Portal V3
+[![Live Demo](https://img.shields.io/badge/Live-Streaming-brightgreen)](https://saipreethamjobportapp.streamlit.app/)
+
+[View Live Streaming Demo](https://saipreethamjobportapp.streamlit.app/)
 
 A powerful, AI-driven local job aggregator and career assistant. This dashboard consolidates job listings from multiple sources (LinkedIn, Naukri), manages your applications, and provides advanced AI analytics using Google Gemini.
 
