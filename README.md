@@ -89,4 +89,23 @@ The application will launch at `http://localhost:8501`.
 
 ---
 
+## 📸 Screenshots
+
+### Application Portal
+<img width="100%" alt="Application Portal" src="https://github.com/user-attachments/assets/1f474edf-a199-4f1c-bc5a-ba720187058c" />
+
+### Filter Search
+<img width="100%" alt="Filter Search" src="https://github.com/user-attachments/assets/f4699b18-786a-4c35-823e-82ec4f160d95" />
+
+### Source Search
+<img width="100%" alt="Source Search" src="https://github.com/user-attachments/assets/9a839f53-1eaf-4569-9866-dcc28fbf4cc7" />
+
+### AI RAG Based Companion
+<img width="100%" alt="AI RAG Companion" src="https://github.com/user-attachments/assets/5f416f14-2608-43e0-9cd6-60244cd222b9" />
+
+### RAG Based Resume Upload & Skill Analysis
+<img width="100%" alt="Resume Analysis" src="https://github.com/user-attachments/assets/b640955e-f0bb-472d-8dea-5540d247988d" />
+
+---
+
 *Built with ❤️ for generic career optimization.*
