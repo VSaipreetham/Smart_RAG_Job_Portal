@@ -22,3 +22,8 @@ To enable the AI features:
     ```
 
 The AI Career Companion will appear in the "🤖 AI Career Coach" tab. Upload your resume (PDF) and start chatting!
+    
+5. **Explore AI Analytics (New!)**:
+    Go to the **"📊 Analytics"** tab to access:
+    - **Ask your Job Database**: Use RAG to query your specific job list (e.g., "Find me jobs dealing with Fintech").
+    - **Global Skill Gap**: Get a strategic analysis of missing skills across *all* your top job matches.

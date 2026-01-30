@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from models import Session, Job, JobStatus, engine
+from sqlalchemy import func
 from scraper import scrape_jobs
 from data_export import export_jobs_to_excel
 from scheduler_service import start_scheduler
@@ -8,6 +9,8 @@ from notifications import send_email_notification
 from calendar_integration import create_calendar_note
 
 import os
+import datetime
+import requests
 from dotenv import load_dotenv
 
 load_dotenv() # Load environment variables
@@ -16,12 +19,16 @@ load_dotenv() # Load environment variables
 # Page Config
 st.set_page_config(page_title="Smart Job Portal", layout="wide")
 
-if 'scheduler_started' not in st.session_state:
+@st.cache_resource
+def init_scheduler():
     try:
-        start_scheduler()
-        st.session_state['scheduler_started'] = True
-    except:
-        pass 
+        return start_scheduler()
+    except Exception as e:
+        print(f"Failed to start scheduler: {e}")
+        return None
+
+if 'scheduler' not in st.session_state:
+    st.session_state['scheduler'] = init_scheduler() 
 
 def get_session():
     return Session()
@@ -40,22 +47,162 @@ sources = [r[0] for r in session.query(Job.source).distinct()]
 source_filter = st.sidebar.multiselect("Filter by Source", sources, default=[])
 date_sort = st.sidebar.selectbox("Sort By Date", ["Newest First", "Oldest First"])
 
+# --- TIME SLOT FILTER ---
+st.sidebar.markdown("---")
+st.sidebar.header("⏳ Time Slot Filter")
+use_time_filter = st.sidebar.checkbox("Enable Time Filter", value=False)
+
+start_dt_filter = None
+end_dt_filter = None
+
+if use_time_filter:
+    # Get range from DB to set sensible defaults
+    # min_date_db = session.query(func.min(Job.posted_date)).scalar()
+    # max_date_db = session.query(func.max(Job.posted_date)).scalar()
+    
+    # User feedback: defaults were showing 2019. 
+    # Better default: Show Today's jobs by default when filter is enabled.
+    now = datetime.datetime.now()
+    default_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    default_end = now.replace(hour=23, minute=59, second=59, microsecond=0)
+
+    c_t1, c_t2 = st.sidebar.columns(2)
+    with c_t1:
+        start_d = st.date_input("Start Date", value=default_start.date())
+        start_t = st.time_input("Start Time", value=default_start.time())
+    with c_t2:
+        end_d = st.date_input("End Date", value=default_end.date())
+        end_t = st.time_input("End Time", value=default_end.time())
+        
+    start_dt_filter = datetime.datetime.combine(start_d, start_t)
+    end_dt_filter = datetime.datetime.combine(end_d, end_t)
+
+# --- WORLD TIME CONVERTER ---
+st.sidebar.markdown("---")
+st.sidebar.header("🌍 World Time to IST")
+city_input = st.sidebar.text_input("Enter City (e.g. New York, Tokyo)")
+check_time_btn = st.sidebar.button("Check Time")
+
+if check_time_btn and city_input:
+    # Basic mapping of common tech hubs to Timezones
+    CITY_MAP = {
+        'new york': 'America/New_York',
+        'sf': 'America/Los_Angeles',
+        'san francisco': 'America/Los_Angeles',
+        'bay area': 'America/Los_Angeles',
+        'london': 'Europe/London',
+        'tokyo': 'Asia/Tokyo',
+        'sydney': 'Australia/Sydney',
+        'melbourne': 'Australia/Melbourne',
+        'singapore': 'Asia/Singapore',
+        'dublin': 'Europe/Dublin',
+        'berlin': 'Europe/Berlin',
+        'paris': 'Europe/Paris',
+        'toronto': 'America/Toronto',
+        'vancouver': 'America/Vancouver',
+        'chicago': 'America/Chicago',
+        'austin': 'America/Chicago',
+        'seattle': 'America/Los_Angeles',
+        'bengaluru': 'Asia/Kolkata',
+        'bangalore': 'Asia/Kolkata'
+    }
+    
+    tz = CITY_MAP.get(city_input.lower())
+    if not tz:
+        # Try fuzzy match or just warn
+        st.sidebar.warning(f"Could not auto-detect timezone for '{city_input}'. Using UTC.")
+        tz = "Etc/UTC"
+    
+    try:
+        # Fetch current time for that zone
+        # We use a reliable public API for checking, with User-Agent to avoid blocking
+        url = f"http://worldtimeapi.org/api/timezone/{tz}"
+        headers = {'User-Agent': 'SmartJobPortal/1.0'}
+        
+        # Retry logic: Try worldtimeapi, if fail, try fuzzy calculation (Manual Fallbacks for common zones)
+        
+        try:
+            resp = requests.get(url, timeout=3, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            local_str = data['datetime']
+            unixtime = data['unixtime']
+            raw_offset = data['utc_offset']
+            ist_time = datetime.datetime.utcfromtimestamp(unixtime) + datetime.timedelta(hours=5, minutes=30)
+            
+            st.sidebar.success(f"✅ Zone: {tz}")
+            st.sidebar.write(f"**Local:** {local_str[11:19]} ({raw_offset})")
+            st.sidebar.write(f"**IST:** {ist_time.strftime('%H:%M:%S')}")
+            
+        except (requests.exceptions.RequestException, ValueError):
+            # Fallback: Simple manual calculation for known zones if API fails
+            # This is "Rough" because it doesn't account for DST perfectly without pytz, 
+            # but it is better than crashing.
+            st.sidebar.warning("API unstable, using offline estimate (Checking DST manually is complex without pytz).")
+            
+            utc_now = datetime.datetime.utcnow()
+            
+            # Rough Standard Offsets (Approximation)
+            OFFSETS = {
+                'America/New_York': -5, # EST (Standard)
+                'America/Chicago': -6,  # CST
+                'America/Los_Angeles': -8, # PST
+                'Europe/London': 0,
+                'Europe/Paris': 1,
+                'Asia/Tokyo': 9,
+                'Australia/Sydney': 11,
+                'Asia/Singapore': 8,
+                'Asia/Kolkata': 5.5
+            }
+            
+            offset = OFFSETS.get(tz, 0)
+            local_est = utc_now + datetime.timedelta(hours=offset)
+            ist_est = utc_now + datetime.timedelta(hours=5.5)
+            
+            st.sidebar.write(f"**Est. Local:** {local_est.strftime('%H:%M')} (Std Time)")
+            st.sidebar.write(f"**IST:** {ist_est.strftime('%H:%M')}")
+            
+    except Exception as e:
+        st.sidebar.error(f"Error: {e}")
+
 # Stats
 new_count = session.query(Job).filter(Job.status.in_([JobStatus.NEW, JobStatus.QUEUED])).count()
 notified_count = session.query(Job).filter(Job.status == JobStatus.NOTIFIED).count()
 archived_count = session.query(Job).filter(Job.status == JobStatus.ARCHIVED).count()
+total_count = session.query(Job).count()
 
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("New Jobs", new_count)
-col2.metric("Notified Jobs", notified_count)
-col3.metric("Archived", archived_count)
+# Recent Activity Stats
+utc_now = datetime.datetime.utcnow()
+ten_mins_ago = utc_now - datetime.timedelta(minutes=10)
+recent_count = session.query(Job).filter(Job.posted_date >= ten_mins_ago).count()
 
-if col4.button("🔄 Manual Scrape"):
-    with st.spinner("Scraping..."):
-        scrape_jobs()
-        export_jobs_to_excel()
-    st.success("Scrape & Export Complete!")
-    st.rerun()
+last_job = session.query(Job).order_by(Job.posted_date.desc()).first()
+last_scrape_str = "N/A"
+if last_job and last_job.posted_date:
+    # Convert to IST for display
+    last_ist = last_job.posted_date + datetime.timedelta(hours=5, minutes=30)
+    last_scrape_str = last_ist.strftime("%I:%M %p")
+
+# Layout: Total | New (30m) | Notified | Archived | Last Update | Button
+# Adjust column weights to prevent truncation:
+# Fresh Jobs needs space for delta. Last Update needs space for timestamp.
+c1, c2, c3, c4, c5, c6 = st.columns([1, 1.3, 0.8, 0.8, 1.5, 1.2])
+
+c1.metric("Total Jobs", total_count)
+# "Flushed" counter: Only shows jobs from last 10 minutes
+c2.metric("Fresh Jobs (10m)", recent_count, delta=f"Inbox: {new_count}")
+c3.metric("Notified", notified_count)
+c4.metric("Archived", archived_count)
+c5.metric("Last Update", last_scrape_str)
+
+with c6:
+    st.write("") # Spacer to align button with metrics which have labels
+    if st.button("🔄 Manual Scrape", use_container_width=True):
+        with st.spinner("Scraping..."):
+            scrape_jobs()
+            export_jobs_to_excel()
+        st.success("Done!")
+        st.rerun()
 
 if os.path.exists("jobs_list.xlsx"):
     with open("jobs_list.xlsx", "rb") as file:
@@ -75,6 +222,12 @@ except ImportError:
 
 if 'ai_coach' not in st.session_state and AI_AVAILABLE:
     coach = get_ai_coach()
+    
+    # Hot-fix for code updates: Ensure the new method exists
+    if not hasattr(coach, 'global_skills_gap'):
+        from ai_service import AICoach
+        coach = AICoach() # Force new instance
+    
     # Set Gemini Key from .env
     gemini_key = os.getenv("Google_token")
     if gemini_key:
@@ -83,6 +236,14 @@ if 'ai_coach' not in st.session_state and AI_AVAILABLE:
         st.toast("⚠️ Google_token not found in .env via os.getenv")
     
     st.session_state['ai_coach'] = coach
+elif 'ai_coach' in st.session_state:
+    # Double check existing state object too
+    if not hasattr(st.session_state['ai_coach'], 'global_skills_gap'):
+         from ai_service import AICoach
+         st.session_state['ai_coach'] = AICoach()
+         gemini_key = os.getenv("Google_token")
+         if gemini_key:
+             st.session_state['ai_coach'].set_gemini_key(gemini_key)
 
 # --- MAIN TABS ---
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📥 Inbox", "🚀 My Applications", "📊 Analytics", "📜 History", "🗑️ Archived", "🤖 AI Career Coach"])
@@ -101,43 +262,104 @@ with tab1:
             (Job.title.ilike(f"%{search_query}%")) |
             (Job.company.ilike(f"%{search_query}%"))
         )
+    
+    # Apply Time Filter
+    if use_time_filter and start_dt_filter and end_dt_filter:
+        # Convert User's IST Input -> UTC for Querying DB
+        # User selects "9:00 AM" (IST). We need to find jobs >= "3:30 AM" (UTC).
+        start_utc = start_dt_filter - datetime.timedelta(hours=5, minutes=30)
+        end_utc = end_dt_filter - datetime.timedelta(hours=5, minutes=30)
         
+        query = query.filter(Job.posted_date >= start_utc)
+        query = query.filter(Job.posted_date <= end_utc)
+        st.caption(f"Showing jobs from {start_dt_filter} to {end_dt_filter} (IST)")
+        
+    
     jobs = query.order_by(Job.posted_date.desc()).limit(200).all()
     
+    if not jobs and use_time_filter:
+        # Debugging / UX Helper: Check if jobs exist *outside* that time range
+        # Re-run query without time filter
+        check_q = session.query(Job).filter(Job.status.in_([JobStatus.NEW, JobStatus.QUEUED]))
+        if source_filter:
+            check_q = check_q.filter(Job.source.in_(source_filter))
+        if location_filter:
+            check_q = check_q.filter(Job.location.ilike(f"%{location_filter}%"))
+        if search_query:
+            check_q = check_q.filter(
+                (Job.title.ilike(f"%{search_query}%")) |
+                (Job.company.ilike(f"%{search_query}%"))
+            )
+        count_exist = check_q.count()
+        if count_exist > 0:
+            st.warning(f"⚠️ No jobs found between **{start_t}** and **{end_t}** (IST). However, **{count_exist}** jobs match your other filters. Try widening the time range or disabling the time filter.")
+        else:
+            st.info("No jobs found matching filters.")
+    elif not jobs:
+         st.info("No jobs found matching filters.")
+    
     if jobs:
+        # Select All / Deselect All Logic
+        if 'select_all_flag' not in st.session_state:
+            st.session_state['select_all_flag'] = False
+        
+        c_sel1, c_sel2, _ = st.columns([1, 1, 6])
+        with c_sel1:
+            if st.button("✅ Select All"):
+                st.session_state['select_all_flag'] = True
+                st.rerun()
+        with c_sel2:
+            if st.button("⬜ Deselect All"):
+                st.session_state['select_all_flag'] = False
+                st.rerun()
+
+        default_select = st.session_state['select_all_flag']
+
         with st.form("process_jobs"):
             data = []
             for j in jobs:
+                # Convert UTC to IST (Naive + 5:30)
+                # Assumes DB is storing UTC (which we reverted to).
+                posted_ist = j.posted_date
+                if posted_ist:
+                     posted_ist = posted_ist + datetime.timedelta(hours=5, minutes=30)
+
                 data.append({
                     "id": j.id,
-                    "Select": False,
+                    "Select": default_select,
                     "Title": j.title,
                     "Company": j.company,
                     "Location": j.location,
                     "Source": j.source, 
                     "URL": j.url,
-                    "Posted Date": j.posted_date
+                    "Posted Date": posted_ist
                 })
             
             df = pd.DataFrame(data)
-            edited_df = st.data_editor(df, column_config={
-                "Select": st.column_config.CheckboxColumn("Select", default=False),
-                "URL": st.column_config.LinkColumn("Link"),
-                "Posted Date": st.column_config.DatetimeColumn("Posted Date", format="D MMM YYYY, h:mm a"),
-                "Source": st.column_config.TextColumn("Source")
-            }, disabled=["id", "Title", "Company", "Location", "Source", "URL", "Posted Date"], hide_index=True)
+            # Use dynamic key to force refresh when select all is toggled
+            editor_key = f"editor_{default_select}_{len(jobs)}"
             
-            c1, c2, c3 = st.columns([1, 1, 4])
+            edited_df = st.data_editor(df, column_config={
+                "Select": st.column_config.CheckboxColumn("Select", default=default_select),
+                "URL": st.column_config.LinkColumn("Link"),
+                "Posted Date": st.column_config.DatetimeColumn("Posted Date (IST)", format="D MMM YYYY, h:mm a"),
+                "Source": st.column_config.TextColumn("Source")
+            }, disabled=["id", "Title", "Company", "Location", "Source", "URL", "Posted Date"], hide_index=True, key=editor_key)
+            
+            c1, c2, c3 = st.columns([1, 1, 1])
             with c1:
                 apply_btn = st.form_submit_button("🚀 Mark Applied")
             with c2:
                 archive_btn = st.form_submit_button("🗑️ Archive")
+            with c3:
+                delete_btn = st.form_submit_button("❌ Delete")
             
             if apply_btn:
                 selected_rows = edited_df[edited_df["Select"] == True]
                 for index, row in selected_rows.iterrows():
                     job = session.query(Job).get(row['id'])
-                    job.status = JobStatus.APPLIED
+                    if job:
+                        job.status = JobStatus.APPLIED
                 session.commit()
                 st.success(f"Moved {len(selected_rows)} jobs to Applications!")
                 st.rerun()
@@ -146,9 +368,22 @@ with tab1:
                 selected_rows = edited_df[edited_df["Select"] == True]
                 for index, row in selected_rows.iterrows():
                     job = session.query(Job).get(row['id'])
-                    job.status = JobStatus.ARCHIVED
+                    if job:
+                        job.status = JobStatus.ARCHIVED
                 session.commit()
                 st.success("Archived.")
+                st.rerun()
+
+            if delete_btn:
+                selected_rows = edited_df[edited_df["Select"] == True]
+                count = 0
+                for index, row in selected_rows.iterrows():
+                    job = session.query(Job).get(row['id'])
+                    if job:
+                        session.delete(job)
+                        count += 1
+                session.commit()
+                st.success(f"Deleted {count} jobs permanently.")
                 st.rerun()
     else:
         st.info("No jobs found matching filters.")
@@ -197,28 +432,271 @@ with tab2:
         st.info("No active applications yet. Go to Inbox and 'Mark Applied'!")
 
 with tab3:
-    st.subheader("Job Market Insights")
+    st.subheader("📊 Job Market Analytics")
     
     # Analytics Queries
     df_all = pd.read_sql(session.query(Job).statement, session.bind)
     
     if not df_all.empty:
+        # 1. Preprocessing
+        # Convert Enum to string
+        if 'status' in df_all.columns:
+            df_all['status'] = df_all['status'].astype(str)
+        
+        # Convert UTC to IST
+        df_all['posted_ist'] = pd.to_datetime(df_all['posted_date']) + pd.Timedelta(hours=5, minutes=30)
+        
+        # Layout: 2x2 Grid
+        g1, g2 = st.columns(2)
+        g3, g4 = st.columns(2)
+        
+        # --- G1: Jobs Over Time (Hourly Trend) ---
+        with g1:
+            st.markdown("#### 📈 Hourly Posting Trend (Last 24h)")
+            # Filter last 24h
+            last_24h = datetime.datetime.now() - datetime.timedelta(hours=24)
+            df_recent = df_all[df_all['posted_ist'] >= last_24h]
+            if not df_recent.empty:
+                hourly_counts = df_recent.set_index('posted_ist').resample('H').size()
+                st.line_chart(hourly_counts)
+            else:
+                st.info("Not enough data for trend.")
+
+        # --- G2: Distribution by Source ---
+        with g2:
+            st.markdown("#### 📡 Jobs by Source")
+            source_counts = df_all['source'].value_counts()
+            st.bar_chart(source_counts)
+
+        # --- G3: Top Companis ---
+        with g3:
+            st.markdown("#### 🏢 Top Hiring Companies")
+            company_counts = df_all['company'].value_counts().head(10)
+            st.bar_chart(company_counts, horizontal=True)
+
+        # --- G4: Top Locations ---
+        with g4:
+            st.markdown("#### 📍 Top Locations")
+            if 'location' in df_all.columns:
+                # Basic cleaning of None
+                df_all['location'] = df_all['location'].fillna("Unknown")
+                loc_counts = df_all['location'].value_counts().head(10)
+                st.bar_chart(loc_counts, horizontal=True)
+            else:
+                st.info("Location data missing.")
+
+        # --- Deep Dive: Title Keywords ---
+        st.markdown("#### 🔑 Top Keywords in Job Titles")
+        all_titles = " ".join(df_all['title'].dropna().astype(str).tolist()).lower()
+        # Simple stop words removal
+        stop_words = set(['and', 'or', 'the', 'a', 'in', 'of', 'for', 'to', 'with', 'at', 'senior', 'junior', 'lead', 'manager', 'engineer', 'developer', 'software'])
+        words = [w for w in all_titles.split() if len(w) > 3 and w not in stop_words]
+        word_series = pd.Series(words).value_counts().head(15)
+        st.bar_chart(word_series)
+
+        st.markdown("---")
+        
+        # --- NEW: Advanced Analytics ---
+        a1, a2 = st.columns(2)
+        
+        with a1:
+            st.markdown("#### 📅 Best Days to Apply")
+            # Day of Week Analysis
+            df_all['day_name'] = df_all['posted_ist'].dt.day_name()
+            # Sort by Monday -> Sunday
+            days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+            day_counts = df_all['day_name'].value_counts().reindex(days_order).fillna(0)
+            st.bar_chart(day_counts)
+            
+        with a2:
+            st.markdown("#### 🏡 Work Mode (Remote vs On-site)")
+            # Simple keyword classification
+            def classify_mode(loc):
+                if not loc: return "Unknown"
+                loc = str(loc).lower()
+                if 'remote' in loc: return 'Remote'
+                if 'hybrid' in loc: return 'Hybrid'
+                return 'On-site'
+            
+            df_all['work_mode'] = df_all['location'].apply(classify_mode)
+            mode_counts = df_all['work_mode'].value_counts()
+            
+            # Use a dataframe for better chart config if needed, or simple bar
+            st.bar_chart(mode_counts)
+
+        # --- Funnel ---
+        st.markdown("#### 🏁 Recruitment Funnel")
+        # Status counts
+        s_counts = df_all['status'].value_counts()
+        # Define funnel order
+        funnel_order = ['new', 'applied', 'interview', 'offer', 'rejected']
+        # Filter only existing ones
+        funnel_data = s_counts.reindex([s for s in funnel_order if s in s_counts.index]).fillna(0)
+        
+        if not funnel_data.empty:
+            st.bar_chart(funnel_data)
+        else:
+            st.info("Start applying to generate funnel data!")
+
+        st.markdown("---")
+        
+        # --- NEW EST: Seniority & Tech Stack ---
+        b1, b2 = st.columns(2)
+        
+        with b1:
+            st.markdown("#### 👔 Job Seniority Distribution")
+            def classify_seniority(title):
+                t = str(title).lower()
+                if 'senior' in t or 'sr.' in t or 'lead' in t or 'staff' in t or 'principal' in t: return 'Senior/Lead'
+                if 'junior' in t or 'jr.' in t or 'entry' in t or 'associate' in t: return 'Junior/Entry'
+                if 'intern' in t or 'internship' in t: return 'Intern'
+                if 'manager' in t or 'head' in t or 'director' in t: return 'Management'
+                return 'Mid-Level/Unspecified'
+            
+            df_all['seniority'] = df_all['title'].apply(classify_seniority)
+            seniority_counts = df_all['seniority'].value_counts()
+            st.bar_chart(seniority_counts)
+            
+        with b2:
+            st.markdown("#### 💻 In-Demand Technologies")
+            tech_keywords = {
+                "Python": ["python", "django", "flask", "fastapi"],
+                "JavaScript/TS": ["javascript", "typescript", "react", "node", "angular", "vue"],
+                "Java": ["java", "spring"],
+                "C++": ["c++"],
+                "Cloud/DevOps": ["aws", "azure", "gcp", "docker", "kubernetes", "terraform"],
+                "Data/AI": ["sql", "pandas", "pytorch", "tensorflow", "spark", "llm", "ai", "machine learning"],
+                "Go": ["golang"],
+                "Rust": ["rust"]
+            }
+            
+            tech_counts = {}
+            # Scan titles (and descriptions if available, but titles for speed)
+            # Titles are usually "Senior Python Engineer", so title-scan is effective.
+            all_text_lower = " ".join(df_all['title'].dropna().astype(str).tolist()).lower()
+            
+            for category, keywords in tech_keywords.items():
+                count = 0
+                for k in keywords:
+                    count += all_text_lower.count(k)
+                if count > 0:
+                    tech_counts[category] = count
+            
+            if tech_counts:
+                st.bar_chart(pd.Series(tech_counts).sort_values(ascending=False))
+            else:
+                st.info("No tech keywords found in titles.")
+
+        st.markdown("---")
+        
+        # --- NEW EST: Pay & Job Type ---
         c1, c2 = st.columns(2)
         
         with c1:
-            st.markdown("#### Jobs by Source")
-            source_counts = df_all['source'].value_counts()
-            st.bar_chart(source_counts)
-            
+            st.markdown("#### 💰 Salary Estimation (Experimental)")
+            # Try to extract numbers from 'pay' column if it exists and has content
+            if 'pay' in df_all.columns:
+                # Basic cleaner: look for "k" values e.g. "120k", "150000"
+                # This is very rough as 'pay' is unstructured text usually.
+                # We filter for values that look like annual salaries (30k - 500k)
+                
+                def extract_salary(val):
+                    import re
+                    if not val or val == "N/A": return None
+                    val = str(val).lower()
+                    # Find numbers
+                    nums = re.findall(r'\d+', val.replace(',', '').replace('k', '000'))
+                    if nums:
+                        # Take the average of numbers found in string (e.g. "100k-150k")
+                        avg = sum([int(n) for n in nums]) / len(nums)
+                        if 30000 < avg < 500000: # Reasonable annual range filter
+                            return avg
+                    return None
+                    
+                salaries = df_all['pay'].apply(extract_salary).dropna()
+                if not salaries.empty:
+                    # Histogram roughly
+                    # FIX: Convert IntervalIndex to string to avoid Arrow/Altair schema error
+                    hist_data = pd.cut(salaries, bins=5).value_counts().sort_index()
+                    hist_data.index = hist_data.index.astype(str)
+                    st.bar_chart(hist_data)
+                    st.caption(f"Based on {len(salaries)} jobs with parseable salary data.")
+                else:
+                    st.info("Not enough structured salary data available yet.")
+                
+                # AI Estimation Feature
+                if st.button("🤖 Estimate Salaries with AI (RAG Analysis)"):
+                    if 'ai_coach' in st.session_state:
+                         with st.spinner("Consulting AI Market Analyst (Analyzing your DB)..."):
+                             # RAG: Retrieve context from DB
+                             # Pass Title, Company, Location, Pay to give full context
+                             context_jobs = df_all[['title', 'company', 'location', 'pay']].head(50).to_dict('records')
+                             analysis = st.session_state['ai_coach'].estimate_market_ranges(context_jobs)
+                             st.markdown(analysis)
+                    else:
+                        st.error("AI Coach not initialized.")
+
+            else:
+                st.info("Pay column not available.")
+
         with c2:
-            st.markdown("#### Jobs by Status")
-            status_counts = df_all['status'].value_counts()
-            # Convert Enum to string for chart
-            st.bar_chart(status_counts.astype(str))
+            st.markdown("#### 📜 Job Type Distribution")
             
-        st.markdown("#### Top Companies Hiring (Top 20)")
-        company_counts = df_all['company'].value_counts().head(20)
-        st.bar_chart(company_counts)
+            def classify_type(title):
+                t = str(title).lower()
+                if 'contract' in t or 'contractor' in t: return 'Contract'
+                if 'part-time' in t or 'part time' in t: return 'Part-Time'
+                if 'freelance' in t: return 'Freelance'
+                if 'temp' in t or 'temporary' in t: return 'Temporary'
+                # Default logic: most jobs are fulltime if not specified
+                return 'Full-Time'
+            
+            # Use title for classification
+            type_counts = df_all['title'].apply(classify_type).value_counts()
+            st.bar_chart(type_counts)
+
+        st.markdown("---")
+        st.subheader("🧠 AI Market Intelligence (RAG)")
+        
+        rag_c1, rag_c2 = st.columns([1, 1])
+        
+        with rag_c1:
+            st.markdown("#### 💬 Ask your Job Database")
+            rag_query = st.text_input("Ask a question about the market:", placeholder="E.g., Which companies are hiring for Remote Python roles?")
+            if rag_query and st.button("🔍 Analyze with AI"):
+                if 'ai_coach' in st.session_state:
+                    with st.spinner("Analyzing Market Data..."):
+                        # Convert all jobs to dict for RAG
+                        # Ensure we convert Timestamps to str to avoid serialization issues if any
+                        rag_jobs = df_all.to_dict('records')
+                        answer = st.session_state['ai_coach'].market_insights_rag(rag_query, rag_jobs)
+                        st.markdown(f"**Insight:**\n\n{answer}")
+                else:
+                    st.error("AI Service not ready.")
+
+        with rag_c2:
+            st.markdown("#### 🌍 Global Skill Gap Analysis")
+            st.caption("Compare your resume against the top 20 most relevant jobs in your Inbox.")
+            if st.button("🧬 Identify Strategic Gaps"):
+                if 'ai_coach' in st.session_state:
+                     res_text = st.session_state.get('resume_text', "")
+                     if len(res_text) < 50:
+                         st.warning("⚠️ Please upload your resume in the 'AI Career Coach' tab first!")
+                     else:
+                         with st.spinner("Conducting Deep Market Analysis..."):
+                             # Pass relevant jobs (New/Applied) for gap analysis
+                             # We use the subset logic
+                             target_jobs_df = df_all[df_all['status'].isin(['new', 'queued', 'applied'])]
+                             if target_jobs_df.empty:
+                                 target_jobs_df = df_all # Fallback to all
+                             
+                             target_jobs = target_jobs_df.to_dict('records')
+                             
+                             analysis = st.session_state['ai_coach'].global_skills_gap(res_text, target_jobs)
+                             st.markdown(analysis)
+                else:
+                    st.error("AI Service not ready.")
+
     else:
         st.warning("No data for analytics.")
 
@@ -228,32 +706,103 @@ with tab4:
     
     fdata = []
     for j in history:
+        # Convert to IST
+        posted_ist = j.posted_date
+        if posted_ist:
+                posted_ist = posted_ist + datetime.timedelta(hours=5, minutes=30)
+                
         fdata.append({
             "Title": j.title,
             "Company": j.company,
             "Source": j.source,
-            "Posted Date": j.posted_date,
+            "Posted Date": posted_ist,
             "URL": j.url
         })
     if fdata:
-        st.dataframe(fdata, column_config={"URL": st.column_config.LinkColumn("Link")}, hide_index=True)
+        st.dataframe(fdata, column_config={
+            "URL": st.column_config.LinkColumn("Link"),
+            "Posted Date": st.column_config.DatetimeColumn("Posted Date (IST)", format="D MMM YYYY, h:mm a")
+        }, hide_index=True)
     else:
         st.info("No history.")
 
 with tab5:
     st.subheader("Archived Jobs")
-    archived = session.query(Job).filter(Job.status == JobStatus.ARCHIVED).order_by(Job.posted_date.desc()).limit(100).all()
+    archived = session.query(Job).filter(Job.status == JobStatus.ARCHIVED).order_by(Job.posted_date.desc()).limit(200).all()
     
-    adata = []
-    for j in archived:
-        adata.append({
-            "Title": j.title,
-            "Company": j.company,
-            "Source": j.source,
-            "URL": j.url
-        })
-    if adata:
-        st.dataframe(adata, column_config={"URL": st.column_config.LinkColumn("Link")}, hide_index=True)
+    if archived:
+        # Select All / Deselect All Logic for Archive
+        if 'select_all_archive_flag' not in st.session_state:
+            st.session_state['select_all_archive_flag'] = False
+        
+        c_arc_1, c_arc_2, _ = st.columns([1, 1, 6])
+        with c_arc_1:
+            if st.button("✅ Select All", key="arc_sel_all"):
+                st.session_state['select_all_archive_flag'] = True
+                st.rerun()
+        with c_arc_2:
+            if st.button("⬜ Deselect All", key="arc_desel_all"):
+                st.session_state['select_all_archive_flag'] = False
+                st.rerun()
+
+        default_select_arc = st.session_state['select_all_archive_flag']
+
+        with st.form("process_archive"):
+            adata = []
+            for j in archived:
+                # Convert UTC to IST
+                posted_ist = j.posted_date
+                if posted_ist:
+                     posted_ist = posted_ist + datetime.timedelta(hours=5, minutes=30)
+                
+                adata.append({
+                    "id": j.id,
+                    "Select": default_select_arc,
+                    "Title": j.title,
+                    "Company": j.company,
+                    "Source": j.source,
+                    "Posted Date": posted_ist,
+                    "URL": j.url
+                })
+            
+            df_arc = pd.DataFrame(adata)
+            editor_key_arc = f"editor_archive_{default_select_arc}_{len(archived)}"
+            
+            edited_df_arc = st.data_editor(df_arc, column_config={
+                "Select": st.column_config.CheckboxColumn("Select", default=default_select_arc),
+                "URL": st.column_config.LinkColumn("Link"),
+                "Posted Date": st.column_config.DatetimeColumn("Posted Date (IST)", format="D MMM YYYY, h:mm a"),
+            }, disabled=["id", "Title", "Company", "Source", "Posted Date", "URL"], hide_index=True, key=editor_key_arc)
+            
+            ac1, ac2 = st.columns(2)
+            with ac1:
+                restore_btn = st.form_submit_button("♻️ Restore to Inbox")
+            with ac2:
+                delete_perm_btn = st.form_submit_button("❌ Permanent Delete")
+            
+            if restore_btn:
+                selected_rows = edited_df_arc[edited_df_arc["Select"] == True]
+                count = 0
+                for index, row in selected_rows.iterrows():
+                    job = session.query(Job).get(row['id'])
+                    if job:
+                        job.status = JobStatus.NEW
+                        count += 1
+                session.commit()
+                st.success(f"Restored {count} jobs to Inbox.")
+                st.rerun()
+
+            if delete_perm_btn:
+                selected_rows = edited_df_arc[edited_df_arc["Select"] == True]
+                count = 0
+                for index, row in selected_rows.iterrows():
+                    job = session.query(Job).get(row['id'])
+                    if job:
+                        session.delete(job)
+                        count += 1
+                session.commit()
+                st.success(f"Permanently deleted {count} jobs.")
+                st.rerun()
     else:
         st.info("Trash is empty.")
 
@@ -265,10 +814,12 @@ with tab6:
     else:
         coach = st.session_state.get('ai_coach')
         
-        col_ai_1, col_ai_2 = st.columns([1, 1])
-        
-        with col_ai_1:
-            st.subheader("📄 Resume Analysis")
+        # Layout: Split Resume/Matching (Left) and Chat (Right)
+        col_resume, col_chat = st.columns([1, 1])
+
+        # --- LEFT: Resume & Matching ---
+        with col_resume:
+            st.subheader("📄 Resume Center")
             uploaded_file = st.file_uploader("Upload Resume (PDF)", type="pdf")
             
             if uploaded_file is not None:
@@ -278,65 +829,99 @@ with tab6:
                         st.session_state['resume_text'] = text
                         st.success("Resume Parsed!")
                 
-                st.text_area("Extracted Resume (Preview)", st.session_state['resume_text'][:500] + "...", height=150)
+                st.text_area("Resume Preview", st.session_state['resume_text'][:300] + "...", height=100)
                 
-                if st.button("🔍 Find Best Job Matches"):
+                if st.button("� Rank My Jobs (RAG)"):
                     if coach:
-                        with st.spinner("Analyzing DB against Resume..."):
+                        with st.spinner("Analyzing Database against Resume..."):
                             # Get all open jobs
-                            open_jobs = session.query(Job).filter(Job.status.in_([JobStatus.NEW, JobStatus.QUEUED, JobStatus.APPLIED])).all()
+                            open_jobs = session.query(Job).filter(Job.status.in_([JobStatus.NEW, JobStatus.QUEUED, JobStatus.APPLIED])).order_by(Job.posted_date.desc()).limit(200).all()
                             
-                            scored_jobs = []
                             try:
                                 scored_jobs = coach.batch_rank_jobs(st.session_state['resume_text'], open_jobs)
-                                st.session_state['ai_matches'] = scored_jobs[:10] # Top 10
+                                st.session_state['ai_matches'] = scored_jobs[:10]
                             except Exception as e:
                                 st.error(f"Error ranking jobs: {e}")
 
-                            # Remove progress bar as batch is fast
-
-                            
             if 'ai_matches' in st.session_state:
-                st.write("### 🎯 Top 10 Matches")
+                st.write("### 🎯 Best Matches")
                 for job, score in st.session_state['ai_matches']:
-                    with st.expander(f"{int(score*100)}% Match: {job.title} @ {job.company}"):
-                        st.write(f"**Source**: {job.source}")
-                        st.write(f"**Location**: {job.location}")
-                        st.markdown(f"[Job Link]({job.url})")
-                        if st.button("💡 Get Advice", key=f"advise_{job.id}"):
-                            st.session_state['target_job_for_advice'] = job
+                     # Visual score
+                    st.progress(float(score), text=f"Match: {int(score*100)}%")
+                    st.write(f"**{job.title}** @ {job.company}")
+                    st.caption(f"{job.location} | {job.source}")
+                    st.markdown(f"[Link]({job.url})")
+                    if st.button("📉 Analyze Gap", key=f"gap_{job.id}"):
+                         with st.spinner("Analyzing..."):
+                             desc = f"{job.title} at {job.company} in {job.location}. Technologies: {job.source}"
+                             advice = coach.get_advice(st.session_state.get('resume_text',""), desc)
+                             st.info(advice)
+                    st.divider()
 
-        with col_ai_2:
-            st.subheader("💬 AI Career Advisor")
+        # --- RIGHT: General Chat ---
+        with col_chat:
+            st.subheader("� AI Buddy")
             
-            if 'target_job_for_advice' in st.session_state:
-                target = st.session_state['target_job_for_advice']
-                st.info(f"Analyzing: **{target.title}** at **{target.company}**")
-                
-                if st.button("📝 Analyze Missing Skills"):
-                    if coach and 'resume_text' in st.session_state:
-                        with st.spinner("Generating Advice (LLM)..."):
-                            # Mock description for now since we don't scrape it
-                            # In real world, we would fetch URL here
-                            job_desc_proxy = f"{target.title} role at {target.company} involving {target.source} technologies in {target.location}."
-                            advice = coach.get_advice(st.session_state['resume_text'], job_desc_proxy)
-                            st.markdown(advice)
-            
-            st.divider()
-            user_q = st.text_input("Ask your AI Career Companion:")
-            if user_q and st.button("Ask Companion"):
+            user_q = st.text_input("Ask about your career:", placeholder="How can I improve my resume?")
+            if user_q and st.button("Ask AI"):
                 if coach:
                     # Context Building
-                    context = ""
+                    ctx = ""
                     if 'resume_text' in st.session_state:
-                         context += f"User's Resume:\n{st.session_state['resume_text']}\n"
-                    if 'target_job_for_advice' in st.session_state:
-                         tgt = st.session_state['target_job_for_advice']
-                         context += f"Target Job: {tgt.title} at {tgt.company}\nLocation: {tgt.location}\nSource: {tgt.source}"
+                         ctx += f"User Resume Content:\n{st.session_state['resume_text'][:3000]}\n"
+                    
+                    with st.spinner("Thinking..."):
+                        ans = coach.ask_coach(user_q, context=ctx)
+                        st.write(ans)
+        
+        st.markdown("---")
+        
+        # --- BOTTOM: Job Toolkit (The New Feature) ---
+        st.subheader("🛠️ Job Application Toolkit")
+        st.caption("Select a specific job from the database to generate targeted content.")
+        
+        # Fetch recent jobs for context
+        jobs_db = session.query(Job).order_by(Job.posted_date.desc()).limit(50).all()
+        job_options = {f"{j.id}: {j.title} @ {j.company}": j for j in jobs_db}
+        
+        selected_job_key = st.selectbox("Select Target Job:", ["-- Select a Job --"] + list(job_options.keys()))
+        
+        if selected_job_key != "-- Select a Job --":
+            target_job = job_options[selected_job_key]
+            job_details_str = f"Title: {target_job.title}, Company: {target_job.company}, Location: {target_job.location}, Source: {target_job.source}"
+            if target_job.pay:
+                job_details_str += f", Pay: {target_job.pay}"
+            
+            c_a1, c_a2, c_a3, c_a4 = st.columns(4)
+            
+            with c_a1:
+                if st.button("📝 Draft Cover Letter"):
+                    with st.spinner("Writing..."):
+                        res_text = st.session_state.get('resume_text', "No resume uploaded.")
+                        cl = coach.generate_cover_letter(res_text, job_details_str)
+                        st.text_area("Cover Letter", cl, height=400)
+            
+            with c_a2:
+                 if st.button("🎤 Interview Prep"):
+                     with st.spinner("Preparing..."):
+                         q = coach.generate_interview_questions(job_details_str)
+                         st.markdown(q)
 
-                    with st.spinner("Companion is thinking..."):
-                        ans = coach.ask_coach(user_q, context=context)
-                        st.markdown(f"**Companion:**\n\n{ans}")
+            with c_a3:
+                if st.button("👋 Cold Message"):
+                     with st.spinner("Drafting..."):
+                         msg = coach.generate_cold_message(job_details_str)
+                         st.code(msg, language='text')
+
+            with c_a4:
+                if st.button("📉 Missing Skills"):
+                    with st.spinner("Analyzing Gap..."):
+                         res_text = st.session_state.get('resume_text', "")
+                         if len(res_text) < 50:
+                             st.error("Please upload a resume first!")
+                         else:
+                             advice = coach.get_advice(res_text, job_details_str)
+                             st.markdown(advice)
 
 # Close session
 session.close()

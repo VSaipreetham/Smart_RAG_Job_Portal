@@ -15,9 +15,28 @@ class LinkedInScraper(BaseScraper):
         print("Scraping LinkedIn (Guest Mode)...")
         # Added "India" to locations to satisfy user request for Indian results
         searches = [
+            {"keywords": "genai engineer", "location": "India"},
+            {"keywords": "automation engineer", "location": "India"},
+            {"keywords": "SDE", "location": "India"},
             {"keywords": "python developer", "location": "India"},
+            {"keywords": "frontend developer", "location": "India"},
+            {"keywords": "fullstack engineer", "location": "India"},
+            {"keywords": "fullstack engineer", "location": "Remote"},
             {"keywords": "backend engineer", "location": "India"},
-             {"keywords": "software engineer", "location": "Remote"},
+            {"keywords": "backend engineer", "location": "Remote"},
+            {"keywords": "software engineer", "location": "Remote"},
+            {"keywords": "data engineer", "location": "Remote"},
+            {"keywords": "data scientist", "location": "Remote"},
+            {"keywords": "machine learning engineer", "location": "Remote"},
+            {"keywords": "machine learning engineer", "location": "India"},
+            {"keywords": "deep learning engineer", "location": "Remote"},
+            {"keywords": "deep learning engineer", "location": "India"},
+            {"keywords": "data analyst", "location": "Remote"},
+            {"keywords":  "cloud" ,"location": "Remote"},
+            {"keywords":  "cloud" ,"location": "India"},
+            {"keywords":  "GenAI" ,"location": "Remote"},
+            {"keywords":  "GenAI" ,"location": "India"},
+
         ]
         
         for s in searches:
@@ -33,7 +52,8 @@ class LinkedInScraper(BaseScraper):
                     'Accept-Language': 'en-US,en;q=0.9',
                 }
                 
-                url = f"https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords={k}&location={loc}"
+                # Added &f_TPR=r86400 to filter for "Last 24 Hours" only. This prevents stale/repeat jobs.
+                url = f"https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords={k}&location={loc}&f_TPR=r86400"
                 print(f"DEBUG: Fetching LinkedIn URL: {url}")
                 
                 response = requests.get(url, headers=headers, timeout=10)

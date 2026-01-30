@@ -10,21 +10,25 @@ class NaukriScraper(BaseScraper):
         
         # Naukri requires very specific headers to look like a browser
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/json',
             'appid': '109',
-            'systemid': '109'
+            'systemid': '109',
+            'Client-Id': 'd3skt0p',
+            'Content-Type': 'application/json',
+            'Referer': 'https://www.naukri.com/'
         }
         
         # Try multiple keywords
-        keywords = ['python', 'backend']
+        keywords = ['python', 'backend', 'frontend', 'react', 'fullstack', 'genai', 'machine learning', 'data scientist']
         
         for k in keywords:
-            url = f"https://www.naukri.com/jobapi/v3/search?noOfResults=20&urlType=search_by_keyword&searchType=adv&keyword={k}&sort=f"
+            # Enhanced URL signature
+            url = f"https://www.naukri.com/jobapi/v3/search?noOfResults=20&urlType=search_by_keyword&searchType=adv&keyword={k}&pageNo=1&seoKey={k}-jobs&src=jobsearchDesk"
             print(f"DEBUG: Fetching Naukri: {url}")
             
             try:
-                resp = requests.get(url, headers=headers, timeout=10)
+                resp = requests.get(url, headers=headers, timeout=20)
                 if resp.status_code == 200:
                     try:
                         data = resp.json()

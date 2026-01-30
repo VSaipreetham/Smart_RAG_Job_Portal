@@ -6,9 +6,29 @@ from calendar_integration import create_calendar_note
 from data_export import export_jobs_to_excel
 import datetime
 import atexit
+import time
+
+def flush_database():
+    """Flushes the entire job database for the new day."""
+    print(f"[{datetime.datetime.now()}] Flushing database for the new day...")
+    session = Session()
+    try:
+        # Delete all jobs
+        num_jobs = session.query(Job).delete()
+        
+        # Reset daily logs for a fresh start (optional, but requested "start new")
+        session.query(DailyLog).delete()
+        
+        session.commit()
+        print(f"[{datetime.datetime.now()}] Database flushed. {num_jobs} jobs deleted. Log cleaned.")
+    except Exception as e:
+        print(f"[{datetime.datetime.now()}] Error flushing database: {e}")
+        session.rollback()
+    finally:
+        session.close()
 
 def drip_feed_process():
-    print("Running Drip Feed Process...")
+    print(f"[{datetime.datetime.now()}] Running Drip Feed Process...")
     session = Session()
     try:
         today = datetime.date.today()
@@ -56,17 +76,31 @@ def drip_feed_process():
 
 def scheduled_job_sequence():
     """Runs scrape then export"""
-    scrape_jobs()
-    export_jobs_to_excel()
+    print(f"[{datetime.datetime.now()}] Starting scheduled sequence...")
+    try:
+        scrape_jobs()
+        export_jobs_to_excel()
+        print(f"[{datetime.datetime.now()}] Scheduled sequence completed.")
+    except Exception as e:
+        print(f"[{datetime.datetime.now()}] Error in scheduled_job_sequence: {e}")
 
 def start_scheduler():
     scheduler = BackgroundScheduler()
-    # Scrape AND Export every 30 minutes
-    scheduler.add_job(func=scheduled_job_sequence, trigger="interval", minutes=30)
+    # Scrape AND Export every 30 minutes.
+    # Removed next_run_time to prevent double-execution on restarts, since app.py handles initial load.
+    scheduler.add_job(
+        func=scheduled_job_sequence, 
+        trigger="interval", 
+        minutes=10
+    )
     # Check for drip feed every 60 minutes
     scheduler.add_job(func=drip_feed_process, trigger="interval", minutes=60)
     
+    # Flush database every day at midnight (00:00)
+    scheduler.add_job(func=flush_database, trigger="cron", hour=0, minute=0)
+    
     scheduler.start()
-    print("Scheduler started...")
+    print(f"[{datetime.datetime.now()}] Scheduler started...")
     atexit.register(lambda: scheduler.shutdown())
     return scheduler
+

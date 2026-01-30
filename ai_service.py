@@ -91,7 +91,13 @@ class AICoach:
         scored_jobs = []
         
         # Create text representations for embedding
-        job_texts = [f"{j.title} {j.company} {j.location} {j.source}" for j in jobs_list]
+        # Handle both Dicts (from DataFrame) and Objects (from SQLAlchemy)
+        def get_text(j):
+            if isinstance(j, dict):
+                return f"{j.get('title','')} {j.get('company','')} {j.get('location','')} {j.get('source','')}"
+            return f"{j.title} {j.company} {j.location} {j.source}"
+            
+        job_texts = [get_text(j) for j in jobs_list]
         job_embs = self.embedding_model.encode(job_texts, convert_to_tensor=True)
         
         # Calculate Cosine Similarity
@@ -211,6 +217,218 @@ class AICoach:
              output = self.llm_pipeline(prompt, max_length=300)
              return f"{output[0]['generated_text']} *(Local AI)*"
         return "AI not available."
+
+    def estimate_market_ranges(self, jobs_data):
+        """
+        RAG-based Estimation:
+        jobs_data: A list of dicts representing the raw job data from the user's database.
+        We provide this 'Context' to the LLM so it estimates based on the ACTUAL companies/roles found, 
+        not just generic titles.
+        """
+        
+        # 1. RETRIEVAL STEP (Summarizing context window)
+        # We take a sample of recent jobs to form the "Market Context" from the DB
+        context_lines = []
+        for j in jobs_data[:50]: # Feed up to 50 jobs for context
+            pay_info = f" | Mentioned Pay: {j.get('pay')}" if j.get('pay') and len(str(j.get('pay'))) > 3 else ""
+            line = f"- {j.get('title')} @ {j.get('company')} ({j.get('location')}){pay_info}"
+            context_lines.append(line)
+        
+        context_str = "\n".join(context_lines)
+        
+        # 2. AUGMENTED PROMPT
+        prompt = f"""
+        You are a Specialized Data Analyst for a Job Board.
+        
+        **Goal:** Estimate salary ranges for the top roles found in this specific dataset.
+        
+        **The User's Job Database (Recent Listings):**
+        {context_str}
+        
+        **Task:**
+        1. Analyze the specific companies and demand signals in the list above.
+        2. Group similar roles (e.g. "Python Devs", "Product Managers").
+        3. using your internal market knowledge AND the specific companies listed (e.g. Block vs Startup), provide a refined salary estimate (USD).
+        
+        **Output Format:**
+        Markdown table: | Role Group | Companies Found | Estimated Range (USD) | Insight |
+        """
+        
+        if self.gemini_key:
+            try:
+                genai.configure(api_key=self.gemini_key)
+                model = self._get_best_model()
+                if model:
+                    response = model.generate_content(prompt)
+                    return response.text
+            except Exception as e:
+                return f"AI Error: {e}"
+        return ""
+
+    def market_insights_rag(self, user_query, jobs_data):
+        """
+        RAG-based Market Intelligence: Answer questions using the job DB as context.
+        jobs_data: List of dicts (title, company, location, etc.)
+        """
+        self.load_embedding_model()
+        if not self.embedding_model or not jobs_data:
+            return "AI or Data not available."
+
+        # 1. Prepare Data
+        # Limit to recent 200 for performance if list is huge
+        proc_jobs = jobs_data[:200]
+        job_texts = [f"{j.get('title')} @ {j.get('company')} ({j.get('location')}) - {j.get('pay','')} [Source: {j.get('source')}]" for j in proc_jobs]
+        
+        # 2. Embed
+        query_emb = self.embedding_model.encode(user_query, convert_to_tensor=True)
+        job_embs = self.embedding_model.encode(job_texts, convert_to_tensor=True)
+        
+        # 3. Retrieve Top Context (Top 15)
+        # Check if we have enough jobs
+        k = min(15, len(job_texts))
+        scores = util.cos_sim(query_emb, job_embs)[0]
+        top_results = torch.topk(scores, k=k)
+        
+        context_items = [job_texts[idx] for idx in top_results.indices]
+        context_str = "\n".join(context_items)
+        
+        # 4. Generate Insight
+        prompt = f"""
+        You are a Senior Job Market Analyst.
+        
+        **User Query:** '{user_query}'
+        
+        **Relevant Market Data (from database):**
+        {context_str}
+        
+        **Instructions:**
+        1. Answer the query using ONLY the provided data.
+        2. Cite specific companies or roles if relevant.
+        3. Identify trends if asked.
+        4. If the data doesn't support an answer, say so.
+        """
+        
+        # Reuse existing Gemini/Local logic
+        if self.gemini_key:
+             try:
+                genai.configure(api_key=self.gemini_key)
+                model = self._get_best_model()
+                if model:
+                    response = model.generate_content(prompt)
+                    return response.text
+             except Exception as e:
+                 return f"AI Error: {e}"
+        
+        return self.ask_coach(prompt) # Fallback to local logic inside ask_coach path
+
+    def global_skills_gap(self, resume_text, jobs_data):
+        """
+        Analyze the resume against the aggregate of the jobs list to find SYSTEMATIC gaps.
+        """
+        # We don't need RAG here as much as just a high-level summary of the JOB descriptions.
+        # But we can't fit 200 jobs in context.
+        # Strategy: Sample 20 representative jobs or Top 20 best matches.
+        
+        # Let's use the Ranking method first to find the 20 *most relevant* jobs to this user
+        # so we don't suggest skills for irrelevant jobs.
+        
+        ranked_jobs = self.batch_rank_jobs(resume_text, jobs_data)
+        if not ranked_jobs:
+            return "No jobs to analyze."
+            
+        # Take top 20 relevant jobs
+        top_20 = [x[0] for x in ranked_jobs[:20]]
+        
+        # Create a condensed context
+        job_summaries = []
+        for j in top_20:
+             # If we have proper descriptions in the future, use them. 
+             # For now, use Title + Company + Notes/Source as proxy for requirements
+             # Treat 'j' as object if it has .title, else dict
+             if hasattr(j, 'title'):
+                  job_summaries.append(f"- {j.title} @ {j.company}: {j.source}")
+             else:
+                  job_summaries.append(f"- {j.get('title')} @ {j.get('company')}: {j.get('source')}")
+             
+        context_str = "\n".join(job_summaries)
+        
+        prompt = f"""
+        You are a Career Strategist.
+        
+        **User Resume Summary:**
+        {resume_text[:2000]}
+        
+        **Top 20 Target Jobs (Most aligned to user):**
+        {context_str}
+        
+        **Task:**
+        1. Identify the **Common Skill Gaps** across these specific roles that the user is missing.
+        2. Don't nitpick. Look for MAJOR missing keywords (e.g. "Cloud", "Python", "Management").
+        3. Suggest a strategic "Learning Path" to bridge this gap.
+        
+        **Output:**
+        ## 🚨 Strategic Skill Gaps
+        ...
+        ## 🚀 Recommended Learning Path
+        ...
+        """
+        
+        if self.gemini_key:
+            return self.ask_coach(prompt) # Reuse logic
+        return "AI not available."
+
+    def generate_cover_letter(self, resume_text, job_details):
+        """Generates a tailored cover letter."""
+        prompt = f"""
+        You are an expert Resume Writer. Write a professional, compelling cover letter.
+        
+        **My Resume Summary:**
+        {resume_text[:2000]}
+        
+        **Target Job:**
+        {job_details}
+        
+        **Goal:** convince the hiring manager I am the perfect fit. Keep it concise (under 300 words).
+        Use a standard professional format.
+        """
+        return self.ask_coach(prompt)
+
+    def generate_interview_questions(self, job_details):
+        """Generates tailored interview prep based on company style."""
+        prompt = f"""
+        You are an expert Technical Interview Coach. 
+        
+        **Target Job:** {job_details}
+        
+        **Task:**
+        1. Analyze the **Company Culture/Style**: Is it Big Tech (FAANG), a scraped Startup, a Bank/Enterprise, or an Agency?
+        2. Generate 3 **Style-Specific** Interview Questions asking about:
+           - **Question 1: Behavioral/Culture Fit** (tailored to their implied values).
+           - **Question 2: Hard Technical Skill** (crucial for this role).
+           - **Question 3: Scenario/System Design** (relevant to their product/domain).
+        
+        3. For EACH question, provide a **"Winning Answer Strategy"** (bullet points on what to say).
+        
+        **Output Format:**
+        ### 🏢 Company Style: [Your Analysis]
+        
+        #### Q1: [Question]
+        *   **💡 Answer Strategy:** [Tips]
+        
+        ... (repeat for Q2, Q3)
+        """
+        return self.ask_coach(prompt)
+
+    def generate_cold_message(self, job_details):
+        """Generates a LinkedIn connection note."""
+        prompt = f"""
+        Write a 300-character LinkedIn connection request message to a recruiter at this company.
+        
+        **Job:** {job_details}
+        
+        The message should be polite, professional, and mention my interest in this specific role.
+        """
+        return self.ask_coach(prompt)
 
 def extract_text_from_pdf(uploaded_file):
     try:

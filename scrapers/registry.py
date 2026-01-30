@@ -1,4 +1,4 @@
-from .ats_scrapers import GreenhouseScraper, LeverScraper
+from .ats_scrapers import GreenhouseScraper, LeverScraper, AshbyScraper
 from .base import BaseScraper
 from .extra_scrapers import RemoteOKScraper, GoogleJobsScraper
 from .linkedin_scraper import LinkedInScraper
@@ -21,16 +21,16 @@ TARGETS = [
     {"type": "greenhouse", "id": "dropbox"},
     {"type": "greenhouse", "id": "discord"},
     {"type": "greenhouse", "id": "canonical"},
-    {"type": "greenhouse", "id": "doordash"}, # New
-    {"type": "greenhouse", "id": "uber"},     # New
-    {"type": "greenhouse", "id": "lyft"},     # New
-    {"type": "greenhouse", "id": "instacart"},# New
-    {"type": "greenhouse", "id": "reddit"},   # New
-    {"type": "greenhouse", "id": "grammarly"},# New
-    {"type": "greenhouse", "id": "rubrik"},   # New
-    {"type": "greenhouse", "id": "cruise"},   # New
-    {"type": "greenhouse", "id": "block"},    # New (Square)
-    {"type": "greenhouse", "id": "affirm"},   # New
+    {"type": "greenhouse", "id": "doordash"}, 
+    {"type": "greenhouse", "id": "uber"},     
+    {"type": "greenhouse", "id": "lyft"},     
+    {"type": "greenhouse", "id": "instacart"},
+    {"type": "greenhouse", "id": "reddit"},   
+    {"type": "greenhouse", "id": "grammarly"},
+    {"type": "greenhouse", "id": "rubrik"},   
+    {"type": "greenhouse", "id": "cruise"},   
+    {"type": "greenhouse", "id": "block"},    
+    {"type": "greenhouse", "id": "affirm"},   
 
     # --- LEVER ---
     {"type": "lever", "id": "netflix"},
@@ -39,19 +39,21 @@ TARGETS = [
     {"type": "lever", "id": "palantir"},
     {"type": "lever", "id": "udemy"},
     {"type": "lever", "id": "figma"},
-    {"type": "lever", "id": "plaid"},       # New
-    {"type": "lever", "id": "notion"},      # New
-    {"type": "lever", "id": "linear"},      # New
-    {"type": "lever", "id": "chanzuckerberg"}, # New
-    {"type": "lever", "id": "scale"},       # New
+    {"type": "lever", "id": "plaid"},       
+    {"type": "lever", "id": "notion"},      
+    
+    # --- ASHBY ---
+    {"type": "ashby", "id": "linear"},
+    {"type": "ashby", "id": "scale"},
 ]
 
 class WWRScraper(BaseScraper):
+
     def scrape(self):
         print("Scraping We Work Remotely...")
         try:
             url = "https://weworkremotely.com/categories/remote-back-end-programming-jobs"
-            resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+            resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=20)
             soup = BeautifulSoup(resp.content, 'html.parser')
             
             nodes = soup.select('section.jobs li a')
@@ -105,7 +107,8 @@ def run_all_scrapers(legacy_session_ignored=None):
     
     # We use a large thread pool to run almost everything at once
     # Since these are IO-bound net requests, more threads is fine
-    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+    # Reduced workers slightly to prevent rate limits
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         futures = []
         
         # 1. Standard Boards
@@ -123,7 +126,15 @@ def run_all_scrapers(legacy_session_ignored=None):
                 futures.append(executor.submit(scrape_wrapper, GreenhouseScraper, t['id']))
             elif t['type'] == 'lever':
                 futures.append(executor.submit(scrape_wrapper, LeverScraper, t['id']))
+            elif t['type'] == 'ashby':
+                futures.append(executor.submit(scrape_wrapper, AshbyScraper, t['id']))
         
-        # Wait for all
-        concurrent.futures.wait(futures)
-        print("All parallel scrapers finished.")
+        # Wait for all with a decided timeout to prevent hanging forever
+        # 10 minutes max for all scrapers
+        done, not_done = concurrent.futures.wait(futures, timeout=600)
+        
+        if not_done:
+            print(f"WARNING: {len(not_done)} scrapers did not finish in time!")
+            
+        print("All parallel scrapers finished (or timed out).")
+
