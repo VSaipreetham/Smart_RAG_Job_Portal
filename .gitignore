@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+jobs.db
+jobs_v2.db
+jobs_v3.db
+*.xlsx
+token.json
+credentials.json
