@@ -18,7 +18,9 @@ class AICoach:
     def __init__(self):
         self.embedding_model = None
         self.llm_pipeline = None
-        self.gemini_key = None
+        self.gemini_key = os.getenv("Google_token")
+        self.qwen_key = os.getenv("QWEN_token")
+        self.gemma_key = os.getenv("Gemma3b")
         self.device = "cpu" # Default until torch loads
 
     def set_gemini_key(self, key):
@@ -139,9 +141,72 @@ class AICoach:
             st.error(f"Error listing models: {e}")
             return None
 
-    def get_advice(self, resume_text, job_description):
-        """Try Gemini first, then fall back to Local LLM"""
+    def _call_openrouter(self, prompt, api_key, model_name):
+        """Calls OpenRouter API for alternative models."""
+        if not api_key:
+            return None
         
+        import requests
+        import json
+        
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        data = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+        
+        try:
+            response = requests.post(url, headers=headers, data=json.dumps(data), timeout=20)
+            if response.status_code == 200:
+                result = response.json()
+                return result['choices'][0]['message']['content']
+            else:
+                print(f"OpenRouter Error ({model_name}): {response.status_code} {response.text}")
+                return None
+        except Exception as e:
+            print(f"Request Error ({model_name}): {e}")
+            return None
+
+    def _generate_with_fallback(self, prompt):
+        """Centralized logic to try Gemini -> Qwen -> Gemma -> Local."""
+        
+        # 1. Try Gemini
+        if self.gemini_key:
+            try:
+                genai.configure(api_key=self.gemini_key)
+                model = self._get_best_model()
+                if model:
+                    response = model.generate_content(prompt)
+                    return f"**Gemini Analysis ({model.model_name}):**\n\n{response.text}"
+            except Exception as e:
+                print(f"Gemini Fallback Triggered: {e}")
+
+        # 2. Try Qwen (OpenRouter)
+        if self.qwen_key:
+            res = self._call_openrouter(prompt, self.qwen_key, "qwen/qwen-2.5-72b-instruct")
+            if res:
+                return f"**Qwen Analysis:**\n\n{res}"
+
+        # 3. Try Gemma (OpenRouter)
+        if self.gemma_key:
+            res = self._call_openrouter(prompt, self.gemma_key, "google/gemma-2-9b-it")
+            if res:
+                return f"**Gemma Analysis:**\n\n{res}"
+
+        # 4. Fallback to Local
+        self.load_local_llm()
+        if self.llm_pipeline:
+            output = self.llm_pipeline(prompt, max_length=512, do_sample=True, temperature=0.7)
+            return f"**Local AI Analysis:**\n\n{output[0]['generated_text']}"
+        
+        return "No AI model available. Please check tokens in .env."
+
+    def get_advice(self, resume_text, job_description):
+        """Centralized advice with fallback chain."""
         prompt = f"""
         You are an expert AI Career Companion. Help the user land this job.
         
@@ -153,35 +218,13 @@ class AICoach:
         
         **Task:**
         1. Identify the top 3 critical skills missing from the resume.
-        2. Provide 1 specific, actionable piece of advice to improve their chances (e.g., a project idea, a certification, or a resume tweak).
+        2. Provide 1 specific, actionable piece of advice to improve their chances.
         3. Rate their fit for this role on a scale of 1-10.
         
         **Tone:** Encouraging but realistic.
         Response:
         """
-
-        # 1. Try Gemini
-        if self.gemini_key:
-            try:
-                genai.configure(api_key=self.gemini_key)
-                model = self._get_best_model()
-                
-                if model:
-                    response = model.generate_content(prompt)
-                    return f"**Gemini Career Analysis ({model.model_name}):**\n\n{response.text}"
-                else:
-                    return "Error: No supported Gemini models found for your API key."
-                    
-            except Exception as e:
-                return f"Gemini API Error: {str(e)}. (Check your Key)"
-        
-        # 2. Fallback to Local
-        self.load_local_llm()
-        if self.llm_pipeline:
-            output = self.llm_pipeline(prompt, max_length=512, do_sample=True, temperature=0.7)
-            return f"**Local AI Analysis:**\n\n{output[0]['generated_text']}"
-        
-        return "No AI model available (Set Google_token in .env for Gemini)."
+        return self._generate_with_fallback(prompt)
 
     def ask_coach(self, user_question, context=""):
         prompt = f"""
@@ -195,28 +238,7 @@ class AICoach:
         
         **Answer:**
         """
-        
-        # 1. Try Gemini
-        if self.gemini_key:
-            try:
-                genai.configure(api_key=self.gemini_key)
-                model = self._get_best_model()
-                
-                if model:
-                    response = model.generate_content(prompt)
-                    return f"{response.text}"
-                else:
-                    return "Error: No supported Gemini models found."
-
-            except Exception as e:
-                return f"Error: {e}"
-        
-        # 2. Fallback
-        self.load_local_llm()
-        if self.llm_pipeline:
-             output = self.llm_pipeline(prompt, max_length=300)
-             return f"{output[0]['generated_text']} *(Local AI)*"
-        return "AI not available."
+        return self._generate_with_fallback(prompt)
 
     def estimate_market_ranges(self, jobs_data):
         """

@@ -16,7 +16,7 @@ def flush_database():
         # Delete all jobs
         num_jobs = session.query(Job).delete()
         
-        # Reset daily logs for a fresh start (optional, but requested "start new")
+        # Reset daily logs for a fresh start
         session.query(DailyLog).delete()
         
         session.commit()
@@ -128,8 +128,8 @@ def start_scheduler():
     # Check for drip feed every 60 minutes
     scheduler.add_job(func=drip_feed_process, trigger="interval", minutes=60)
     
-    # Keep the cron job for lucky scenarios where app IS awake at midnight
-    scheduler.add_job(func=flush_database, trigger="cron", hour=0, minute=0)
+    # Flush the database every day at 12:00:00 AM (Midnight)
+    scheduler.add_job(func=flush_database, trigger="cron", hour=0, minute=0, second=0)
     
     scheduler.start()
     print(f"[{datetime.datetime.now()}] Scheduler started...")
