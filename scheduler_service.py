@@ -84,10 +84,42 @@ def scheduled_job_sequence():
     except Exception as e:
         print(f"[{datetime.datetime.now()}] Error in scheduled_job_sequence: {e}")
 
+def check_and_flush_db_on_startup():
+    """
+    Cloud-Proof Flush: Checks if the DB has data from a previous day on startup.
+    If yes, flushes it to ensure a fresh start.
+    """
+    print(f"[{datetime.datetime.now()}] Checking for stale data...")
+    session = Session()
+    try:
+        # Check the date of the most recent job
+        last_job = session.query(Job).order_by(Job.posted_date.desc()).first()
+        
+        if last_job:
+            last_job_date = last_job.posted_date.date()
+            today = datetime.date.today()
+            
+            if last_job_date < today:
+                print(f"[{datetime.datetime.now()}] Stale data detected (Last job: {last_job_date}). Flushing...")
+                # Call the flush function
+                flush_database()
+            else:
+                print(f"[{datetime.datetime.now()}] Data is fresh ({last_job_date}). No flush needed.")
+        else:
+            print("Database is empty. Ready for new jobs.")
+            
+    except Exception as e:
+        print(f"Error checking stale data: {e}")
+    finally:
+        session.close()
+
 def start_scheduler():
     scheduler = BackgroundScheduler()
-    # Scrape AND Export every 30 minutes.
-    # Removed next_run_time to prevent double-execution on restarts, since app.py handles initial load.
+    
+    # 1. Run the Startup Check IMMEDIATELY before starting scheduler
+    check_and_flush_db_on_startup()
+
+    # Scrape AND Export every 10 minutes.
     scheduler.add_job(
         func=scheduled_job_sequence, 
         trigger="interval", 
@@ -96,7 +128,7 @@ def start_scheduler():
     # Check for drip feed every 60 minutes
     scheduler.add_job(func=drip_feed_process, trigger="interval", minutes=60)
     
-    # Flush database every day at midnight (00:00)
+    # Keep the cron job for lucky scenarios where app IS awake at midnight
     scheduler.add_job(func=flush_database, trigger="cron", hour=0, minute=0)
     
     scheduler.start()
