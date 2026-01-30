@@ -10,7 +10,7 @@ A local job aggregator dashboard with "Drip Feed" notifications.
     ```
 
 2.  **Environment Variables**:
-    - Open `.env` and fill in your Gmail credentials (App Password required).
+    - Open `.env` and fill in your Gmail credentials (App Password required) and paste your Gemini API Key which can be found be Google AI Studio.
 
 3.  **Google Calendar Setup**:
     - Go to [Google Cloud Console](https://console.cloud.google.com/).
@@ -41,24 +41,24 @@ A local job aggregator dashboard with "Drip Feed" notifications.
     - You can Upload the resume here to retrive the job based on your skillset and position
 
 
-4. **Application Portal**
+ ## **Application Portal**
 <img width="1874" height="891" alt="image" src="https://github.com/user-attachments/assets/1f474edf-a199-4f1c-bc5a-ba720187058c" />
 
-5. **Filter Search**
+ ## **Filter Search**
 
 <img width="1910" height="805" alt="image" src="https://github.com/user-attachments/assets/f4699b18-786a-4c35-823e-82ec4f160d95" />
 
-6. **Source Search**
+ ##  **Source Search**
 <img width="1913" height="550" alt="image" src="https://github.com/user-attachments/assets/9a839f53-1eaf-4569-9866-dcc28fbf4cc7" />
 
 
-5. **AI Based Companion**
+ ##  **AI RAG Based Companion**
 
 <img width="1537" height="843" alt="image" src="https://github.com/user-attachments/assets/5f416f14-2608-43e0-9cd6-60244cd222b9" />
 
 
-7. **Resume Upload and Missing Skills**
-<img width="1896" height="930" alt="image" src="https://github.com/user-attachments/assets/7480f802-3664-428d-a1d8-afbb79267d5f" />
+ ## **RAB Based Resume Upload and Missing Skills functionality**
+<img width="1260" height="610" alt="image" src="https://github.com/user-attachments/assets/b640955e-f0bb-472d-8dea-5540d247988d" />
 
 
 
