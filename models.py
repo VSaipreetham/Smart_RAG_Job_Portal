@@ -38,6 +38,24 @@ class DailyLog(Base):
     count = Column(Integer, default=0)
 
 # Database Setup
-engine = create_engine('sqlite:///jobs_v4.db') # upgraded to v4
+# Database Setup
+import os
+
+# Check for DATABASE_URL environment variable (common in Railway, Render, Heroku)
+db_url = os.getenv("DATABASE_URL")
+
+if db_url:
+    # Production: Use PostgreSQL
+    # Fix for SQLAlchemy requiring 'postgresql://' instead of 'postgres://' (common legacy format)
+    if db_url.startswith("postgres://"):
+        db_url = db_url.replace("postgres://", "postgresql://", 1)
+    
+    print("🔌 Connecting to Production Database (PostgreSQL)...")
+    engine = create_engine(db_url)
+else:
+    # Local: Use SQLite
+    print("📂 Connecting to Local Database (SQLite)...")
+    engine = create_engine('sqlite:///jobs_v4.db', connect_args={'check_same_thread': False})
+
 Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
