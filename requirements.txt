@@ -14,3 +14,4 @@ sentence-transformers
 transformers
 torch
 pdfplumber
+psycopg2-binary
