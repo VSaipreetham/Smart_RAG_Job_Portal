@@ -462,7 +462,8 @@ class AICoach:
         **Goal:** convince the hiring manager I am the perfect fit. Keep it concise (under 300 words).
         Use a standard professional format.
         """
-        return self.ask_coach(prompt)
+        # Fix: Pass model_conf explicitly
+        return self.ask_coach(prompt, context="", model_conf=model_conf)
 
     def generate_interview_questions(self, job_details, model_conf=None):
         """Generates tailored interview prep based on company style."""
@@ -475,7 +476,7 @@ class AICoach:
         1. Analyze the **Company Culture/Style**: Is it Big Tech (FAANG), a scraped Startup, a Bank/Enterprise, or an Agency?
         2. Generate 3 **Style-Specific** Interview Questions asking about:
            - **Question 1: Behavioral/Culture Fit** (tailored to their implied values).
-           - **Question 2: Hard Technical Skill** (crucial for this role).
+           - **Question 2: Hard Technical Skill which includes DSA and LLD and HLD etc depends on the job role and standard of company** (crucial for this role).
            - **Question 3: Scenario/System Design** (relevant to their product/domain).
         
         3. For EACH question, provide a **"Winning Answer Strategy"** (bullet points on what to say).
@@ -488,7 +489,7 @@ class AICoach:
         
         ... (repeat for Q2, Q3)
         """
-        return self.ask_coach(prompt)
+        return self.ask_coach(prompt, context="", model_conf=model_conf)
 
     def generate_cold_message(self, job_details, model_conf=None):
         """Generates a LinkedIn connection note."""
@@ -499,7 +500,7 @@ class AICoach:
         
         The message should be polite, professional, and mention my interest in this specific role.
         """
-        return self.ask_coach(prompt)
+        return self.ask_coach(prompt, context="", model_conf=model_conf)
 
 def extract_text_from_pdf(uploaded_file):
     try:
