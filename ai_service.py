@@ -19,8 +19,8 @@ class AICoach:
         self.embedding_model = None
         self.llm_pipeline = None
         self.gemini_key = os.getenv("Google_token")
-        self.qwen_key = os.getenv("QWEN_token")
-        self.gemma_key = os.getenv("Gemma3b")
+        self.qwen_key = os.getenv("Qwen3b80B_token")
+        self.gemma_key = os.getenv("Gemma3b_token")
         self.device = "cpu" # Default until torch loads
 
     def set_gemini_key(self, key):
@@ -138,7 +138,7 @@ class AICoach:
             
             return None
         except Exception as e:
-            st.error(f"Error listing models: {e}")
+            print(f"Error listing models: {e}")
             return None
 
     def _call_openrouter(self, prompt, api_key, model_name):
@@ -171,7 +171,7 @@ class AICoach:
             print(f"Request Error ({model_name}): {e}")
             return None
 
-    def _generate_with_fallback(self, prompt):
+    def _generate_with_fallback(self, prompt, label_override=None):
         """Centralized logic to try Gemini -> Qwen -> Gemma -> Local."""
         
         # 1. Try Gemini
@@ -181,27 +181,41 @@ class AICoach:
                 model = self._get_best_model()
                 if model:
                     response = model.generate_content(prompt)
-                    return f"**Gemini Analysis ({model.model_name}):**\n\n{response.text}"
+                    # Check if response was successful and has text
+                    if response and hasattr(response, 'text'):
+                         label = label_override if label_override else f"Gemini Analysis ({model.model_name})"
+                         return f"**{label}:**\n\n{response.text}"
+                    else:
+                         print(f"Gemini response has no text or was blocked. Fallback triggered.")
             except Exception as e:
-                print(f"Gemini Fallback Triggered: {e}")
+                # This catches 429 Quota Exceeded and other API errors
+                st.toast(f"⚠️ Gemini Quota/Error: Falling back to Qwen...")
+                print(f"Gemini Fallback Triggered (Error: {e})")
 
         # 2. Try Qwen (OpenRouter)
         if self.qwen_key:
-            res = self._call_openrouter(prompt, self.qwen_key, "qwen/qwen-2.5-72b-instruct")
+            res = self._call_openrouter(prompt, self.qwen_key, "qwen/qwen3-next-80b-a3b-instruct:free")
             if res:
-                return f"**Qwen Analysis:**\n\n{res}"
+                label = label_override if label_override else "Qwen Analysis"
+                return f"**{label}:**\n\n{res}"
+            else:
+                st.toast(f"⚠️ Qwen failed. Falling back to Gemma...")
 
         # 3. Try Gemma (OpenRouter)
         if self.gemma_key:
-            res = self._call_openrouter(prompt, self.gemma_key, "google/gemma-2-9b-it")
+            res = self._call_openrouter(prompt, self.gemma_key, "google/gemma-3n-e2b-it:free")
             if res:
-                return f"**Gemma Analysis:**\n\n{res}"
+                label = label_override if label_override else "Gemma Analysis"
+                return f"**{label}:**\n\n{res}"
+            else:
+                st.toast(f"⚠️ Gemma failed. Falling back to Local AI...")
 
         # 4. Fallback to Local
         self.load_local_llm()
         if self.llm_pipeline:
             output = self.llm_pipeline(prompt, max_length=512, do_sample=True, temperature=0.7)
-            return f"**Local AI Analysis:**\n\n{output[0]['generated_text']}"
+            label = label_override if label_override else "Local AI Analysis"
+            return f"**{label}:**\n\n{output[0]['generated_text']}"
         
         return "No AI model available. Please check tokens in .env."
 
@@ -276,16 +290,7 @@ class AICoach:
         Markdown table: | Role Group | Companies Found | Estimated Range (USD) | Insight |
         """
         
-        if self.gemini_key:
-            try:
-                genai.configure(api_key=self.gemini_key)
-                model = self._get_best_model()
-                if model:
-                    response = model.generate_content(prompt)
-                    return response.text
-            except Exception as e:
-                return f"AI Error: {e}"
-        return ""
+        return self._generate_with_fallback(prompt, label_override="AI Salary Analysis")
 
     def market_insights_rag(self, user_query, jobs_data):
         """
@@ -330,18 +335,7 @@ class AICoach:
         4. If the data doesn't support an answer, say so.
         """
         
-        # Reuse existing Gemini/Local logic
-        if self.gemini_key:
-             try:
-                genai.configure(api_key=self.gemini_key)
-                model = self._get_best_model()
-                if model:
-                    response = model.generate_content(prompt)
-                    return response.text
-             except Exception as e:
-                 return f"AI Error: {e}"
-        
-        return self.ask_coach(prompt) # Fallback to local logic inside ask_coach path
+        return self._generate_with_fallback(prompt, label_override="Market AI Insight")
 
     def global_skills_gap(self, resume_text, jobs_data):
         """
@@ -395,9 +389,7 @@ class AICoach:
         ...
         """
         
-        if self.gemini_key:
-            return self.ask_coach(prompt) # Reuse logic
-        return "AI not available."
+        return self._generate_with_fallback(prompt, label_override="Strategic Gap Analysis")
 
     def generate_cover_letter(self, resume_text, job_details):
         """Generates a tailored cover letter."""
