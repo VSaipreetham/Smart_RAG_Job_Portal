@@ -128,8 +128,8 @@ def start_scheduler():
     # Check for drip feed every 60 minutes
     scheduler.add_job(func=drip_feed_process, trigger="interval", minutes=60)
     
-    # Flush the database every day at 12:00:00 AM (Midnight)
-    scheduler.add_job(func=flush_database, trigger="cron", hour=0, minute=0, second=0)
+    # Flush the database every 10 hours
+    scheduler.add_job(func=flush_database, trigger="interval", hours=10)
     
     scheduler.start()
     print(f"[{datetime.datetime.now()}] Scheduler started...")

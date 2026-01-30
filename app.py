@@ -11,6 +11,7 @@ from calendar_integration import create_calendar_note
 import os
 import datetime
 import requests
+import time
 from dotenv import load_dotenv
 
 load_dotenv() # Load environment variables
@@ -197,12 +198,106 @@ c5.metric("Last Update", last_scrape_str)
 
 with c6:
     st.write("") # Spacer to align button with metrics which have labels
-    if st.button("🔄 Manual Scrape", use_container_width=True):
-        with st.spinner("Scraping..."):
-            scrape_jobs()
-            export_jobs_to_excel()
-        st.success("Done!")
-        st.rerun()
+    import threading
+    
+    # --- SCRAPING STATE MANAGEMENT ---
+    if 'scraping_active' not in st.session_state:
+        st.session_state['scraping_active'] = False
+    
+    if 'scrape_progress' not in st.session_state:
+        st.session_state['scrape_progress'] = 0.0
+        
+    if 'scrape_cancel_event' not in st.session_state:
+        st.session_state['scrape_cancel_event'] = threading.Event()
+        
+    # Function to run in background thread
+    def run_scrape_in_background(callback, cancel_evt):
+        try:
+            scrape_jobs(progress_callback=callback, cancel_event=cancel_evt)
+            if not cancel_evt.is_set():
+                export_jobs_to_excel()
+        except Exception as e:
+            print(f"Thread Error: {e}")
+        finally:
+            st.session_state['scraping_done'] = True # Signal completion
+    
+    # UI Logic
+    from streamlit.runtime.scriptrunner import add_script_run_ctx
+    
+    @st.fragment
+    def manual_scrape_panel():
+        if 'scraping_active' not in st.session_state:
+            st.session_state['scraping_active'] = False
+        
+        if not st.session_state['scraping_active']:
+            if st.button("🔄 Manual Scrape", use_container_width=True):
+                 st.session_state['scraping_active'] = True
+                 st.session_state['scrape_progress'] = 0.0
+                 st.session_state['scraping_done'] = False
+                 st.session_state['scrape_cancel_event'].clear()
+                 
+                 # Define thread-safe update
+                 def update_p(p): 
+                     # Update session state safely
+                     st.session_state['scrape_progress'] = p
+                 
+                 t = threading.Thread(target=run_scrape_in_background, args=(update_p, st.session_state['scrape_cancel_event']))
+                 add_script_run_ctx(t) # CRITICAL: Allows thread to write to session_state
+                 st.session_state['scrape_thread'] = t
+                 t.start()
+                 st.rerun()
+            
+            # Show Last Updated Time
+            if os.path.exists("jobs_list.xlsx"):
+                last_mod = datetime.datetime.fromtimestamp(os.path.getmtime("jobs_list.xlsx"))
+                st.caption(f"Last updated: {last_mod.strftime('%I:%M %p, %d %b')}")
+        else:
+            # ACTIVE STATE (Inside Fragment)
+            with st.status("🚀 Scraper Agents Deployed...", expanded=True) as status:
+                p = st.session_state.get('scrape_progress', 0.0)
+                
+                # Fun Quotes
+                quotes = [
+                     "“Choose a job you love...”",
+                     "“The future belongs to believers...”",
+                     "“Opportunities are created...”",
+                     "“Courage to continue counts...”",
+                     "Searching hidden corners...",
+                     "Handshaking with servers...",
+                     "Unlocking opportunities...",
+                     "Negotiating firewalls...",
+                     "Parsing the matrix...",
+                     "Filtering roles...",
+                ]
+                # Rotate quotes based on time
+                quote_idx = int(time.time() / 3) % len(quotes)
+                st.info(f"💡 {quotes[quote_idx]}")
+                
+                st.progress(p, text=f"Processing... {int(p*100)}%")
+                
+                if st.button("🛑 Cancel Scrape", type="primary"):
+                    st.session_state['scrape_cancel_event'].set()
+                    st.warning("Stopping...")
+                
+                # Check Completion State
+                if st.session_state.get('scraping_done', False):
+                    status.update(label="✅ Scrape Completed!", state="complete", expanded=False)
+                    st.session_state['scraping_active'] = False
+                    st.success("Database Updated!")
+                    time.sleep(1)
+                    st.rerun()
+                elif st.session_state['scrape_cancel_event'].is_set():
+                     status.update(label="🚫 Scrape Cancelled!", state="error", expanded=False)
+                     st.session_state['scraping_active'] = False
+                     st.error("Operation Cancelled.")
+                     time.sleep(1)
+                     st.rerun()
+                else:
+                    # Rerun fragment to update progress
+                    time.sleep(0.5)
+                    st.rerun()
+    
+    manual_scrape_panel()
 
 if os.path.exists("jobs_list.xlsx"):
     with open("jobs_list.xlsx", "rb") as file:
@@ -222,28 +317,71 @@ except ImportError:
 
 if 'ai_coach' not in st.session_state and AI_AVAILABLE:
     coach = get_ai_coach()
+    # Hot-fix: Ensure new methods exist
+    if not hasattr(coach, 'get_available_models'):
+        try:
+             from ai_service import AICoach
+             coach = AICoach() # Force new instance
+        except Exception:
+             pass 
     
-    # Hot-fix for code updates: Ensure the new method exists
-    if not hasattr(coach, 'global_skills_gap'):
-        from ai_service import AICoach
-        coach = AICoach() # Force new instance
-    
-    # Set Gemini Key from .env
+    # Set Gemini Key
     gemini_key = os.getenv("Google_token")
     if gemini_key:
         coach.set_gemini_key(gemini_key)
-    else:
-        st.toast("⚠️ Google_token not found in .env via os.getenv")
     
     st.session_state['ai_coach'] = coach
 elif 'ai_coach' in st.session_state:
-    # Double check existing state object too
-    if not hasattr(st.session_state['ai_coach'], 'global_skills_gap'):
+    # Double check existing object has new methods
+    if not hasattr(st.session_state['ai_coach'], 'get_available_models'):
          from ai_service import AICoach
          st.session_state['ai_coach'] = AICoach()
          gemini_key = os.getenv("Google_token")
          if gemini_key:
              st.session_state['ai_coach'].set_gemini_key(gemini_key)
+
+# --- AI SETTINGS (SIDEBAR) ---
+selected_model_conf = None
+if AI_AVAILABLE and 'ai_coach' in st.session_state:
+    coach = st.session_state['ai_coach']
+    
+    if 'disabled_models' not in st.session_state:
+        st.session_state['disabled_models'] = set()
+        
+    # Get models
+    all_models = coach.get_available_models()
+    # Filter available
+    valid_models = [m for m in all_models if m['id'] not in st.session_state['disabled_models']]
+    
+    if not valid_models:
+        st.sidebar.error("⚠️ All AI models are disabled/failed.")
+    else:
+        st.sidebar.markdown("---")
+        st.sidebar.header("🤖 AI Settings")
+        
+        # Create friendly labels
+        model_options = {m['name']: m for m in valid_models}
+        selected_name = st.sidebar.selectbox("Select Model", list(model_options.keys()))
+        selected_model_conf = model_options[selected_name]
+
+# Helper to run AI safely
+def safe_ai_execute(func, *args, **kwargs):
+    if not selected_model_conf:
+        st.error("No AI Model Selected.")
+        return None
+        
+    try:
+        # Inject model_conf
+        kwargs['model_conf'] = selected_model_conf
+        return func(*args, **kwargs)
+    except Exception as e:
+        # Handle Failure
+        st.error(f"Error with {selected_model_conf['name']}: {e}")
+        st.warning(f"Disabling {selected_model_conf['name']}...")
+        st.session_state['disabled_models'].add(selected_model_conf['id'])
+        # Optional: Force rerun to refresh list
+        # We return None to signal failure
+        return None
 
 # --- MAIN TABS ---
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📥 Inbox", "🚀 My Applications", "📊 Analytics", "📜 History", "🗑️ Archived", "🤖 AI Career Coach"])
@@ -589,6 +727,109 @@ with tab3:
 
         st.markdown("---")
         
+        st.markdown("---")
+        
+        # --- NEW: Application Activity Calculator ---
+        st.markdown("#### 📅 Your Application Velocity")
+        # Get applications from DB
+        apps_df = df_all[df_all['status'].isin(['applied', 'interview', 'offer', 'rejected'])]
+        
+        if not apps_df.empty:
+            # Group by Date
+            apps_df['date_only'] = apps_df['posted_ist'].dt.date
+            daily_apps = apps_df['date_only'].value_counts().sort_index()
+            
+            # Simple Line Chart
+            st.bar_chart(daily_apps)
+            st.caption(f"You have applied to {len(apps_df)} jobs in total.")
+        else:
+            st.info("Start applying to track your velocity here!")
+
+        st.markdown("---")
+
+        # --- NEW: Company Spotlight ---
+        st.markdown("#### 🏢 Company Spotlight")
+        # Dropdown for companies with > 1 job
+        company_list = df_all['company'].value_counts()
+        valid_companies = company_list[company_list > 1].index.tolist()
+        
+        if valid_companies:
+            selected_company = st.selectbox("Select a Company to Analyze:", valid_companies)
+            
+            if selected_company:
+                comp_data = df_all[df_all['company'] == selected_company]
+                
+                sc1, sc2, sc3 = st.columns(3)
+                sc1.metric("Total Jobs", len(comp_data))
+                sc2.metric("Most Common Role", comp_data['title'].mode()[0] if not comp_data['title'].empty else "N/A")
+                
+                # Tech Scan for this company
+                comp_tech = {}
+                comp_text = " ".join(comp_data['title'].fillna("").astype(str).tolist()).lower()
+                for cat, kws in tech_keywords.items(): # Use existing tech_keywords from below
+                    c = 0
+                    for k in kws: c += comp_text.count(k)
+                    if c > 0: comp_tech[cat] = c
+                
+                best_tech = max(comp_tech, key=comp_tech.get) if comp_tech else "Generalist"
+                sc3.metric("Top Tech Focus", best_tech)
+                
+                st.markdown("**Recent Roles:**")
+                st.dataframe(comp_data[['title', 'location', 'posted_ist']].head(5), hide_index=True)
+        else:
+            st.info("Not enough data for company deep dives yet.")
+
+        st.markdown("---")
+        
+        # --- NEW: Source Efficiency Analysis ---
+        st.markdown("#### 🎯 Source Efficiency (Interviews per Source)")
+        # We need to calculate what % of apps turned into interviews per source
+        # 1. Get total apps per source
+        apps_only = df_all[df_all['status'].isin(['applied', 'interview', 'offer', 'rejected'])]
+        
+        if not apps_only.empty:
+            source_apps = apps_only['source'].value_counts()
+            
+            # 2. Get interviews per source
+            interviews_only = df_all[df_all['status'].isin(['interview', 'offer'])]
+            source_interviews = interviews_only['source'].value_counts()
+            
+            # Combine
+            eff_df = pd.DataFrame({'Applications': source_apps, 'Interviews': source_interviews}).fillna(0)
+            eff_df['Conversion Rate (%)'] = (eff_df['Interviews'] / eff_df['Applications'] * 100).round(1)
+            
+            e1, e2 = st.columns([2,1])
+            with e1:
+                st.bar_chart(eff_df[['Applications', 'Interviews']])
+            with e2:
+                st.write("Conversion Rates:")
+                st.dataframe(eff_df[['Conversion Rate (%)']].sort_values(by='Conversion Rate (%)', ascending=False))
+        else:
+             st.info("Apply to more jobs to see Source Efficiency!")
+
+        st.markdown("---")
+
+        # --- NEW: Role Category Analysis ---
+        st.markdown("#### 🎭 Role Category Breakdown")
+        
+        def categorize_role(title):
+            t = str(title).lower()
+            if 'full stack' in t or 'fullstack' in t: return 'Full Stack'
+            if 'back end' in t or 'backend' in t: return 'Backend'
+            if 'front end' in t or 'frontend' in t or 'ui' in t: return 'Frontend'
+            if 'data' in t or 'analyst' in t or 'scientist' in t: return 'Data/AI'
+            if 'cloud' in t or 'devops' in t or 'sre' in t: return 'DevOps/Cloud'
+            if 'product' in t or 'manager' in t: return 'Product/Mgmt'
+            if 'test' in t or 'qa' in t: return 'QA/Testing'
+            return 'Other/General'
+            
+        df_all['role_category'] = df_all['title'].apply(categorize_role)
+        role_counts = df_all['role_category'].value_counts()
+        
+        st.bar_chart(role_counts)
+
+        st.markdown("---")
+        
         # --- NEW EST: Pay & Job Type ---
         c1, c2 = st.columns(2)
         
@@ -631,8 +872,9 @@ with tab3:
                              # RAG: Retrieve context from DB
                              # Pass Title, Company, Location, Pay to give full context
                              context_jobs = df_all[['title', 'company', 'location', 'pay']].head(50).to_dict('records')
-                             analysis = st.session_state['ai_coach'].estimate_market_ranges(context_jobs)
-                             st.markdown(analysis)
+                             analysis = safe_ai_execute(st.session_state['ai_coach'].estimate_market_ranges, context_jobs)
+                             if analysis: st.markdown(analysis)
+                             else: st.rerun()
                     else:
                         st.error("AI Coach not initialized.")
 
@@ -669,8 +911,9 @@ with tab3:
                         # Convert all jobs to dict for RAG
                         # Ensure we convert Timestamps to str to avoid serialization issues if any
                         rag_jobs = df_all.to_dict('records')
-                        answer = st.session_state['ai_coach'].market_insights_rag(rag_query, rag_jobs)
-                        st.markdown(f"**Insight:**\n\n{answer}")
+                        answer = safe_ai_execute(st.session_state['ai_coach'].market_insights_rag, rag_query, rag_jobs)
+                        if answer: st.markdown(f"**Insight:**\n\n{answer}")
+                        else: st.rerun()
                 else:
                     st.error("AI Service not ready.")
 
@@ -692,8 +935,9 @@ with tab3:
                              
                              target_jobs = target_jobs_df.to_dict('records')
                              
-                             analysis = st.session_state['ai_coach'].global_skills_gap(res_text, target_jobs)
-                             st.markdown(analysis)
+                             analysis = safe_ai_execute(st.session_state['ai_coach'].global_skills_gap, res_text, target_jobs)
+                             if analysis: st.markdown(analysis)
+                             else: st.rerun()
                 else:
                     st.error("AI Service not ready.")
 
@@ -854,8 +1098,9 @@ with tab6:
                     if st.button("📉 Analyze Gap", key=f"gap_{job.id}"):
                          with st.spinner("Analyzing..."):
                              desc = f"{job.title} at {job.company} in {job.location}. Technologies: {job.source}"
-                             advice = coach.get_advice(st.session_state.get('resume_text',""), desc)
-                             st.info(advice)
+                             advice = safe_ai_execute(coach.get_advice, st.session_state.get('resume_text',""), desc)
+                             if advice: st.info(advice)
+                             else: st.rerun()
                     st.divider()
 
         # --- RIGHT: General Chat ---
@@ -871,8 +1116,9 @@ with tab6:
                          ctx += f"User Resume Content:\n{st.session_state['resume_text'][:3000]}\n"
                     
                     with st.spinner("Thinking..."):
-                        ans = coach.ask_coach(user_q, context=ctx)
-                        st.write(ans)
+                        ans = safe_ai_execute(coach.ask_coach, user_q, context=ctx)
+                        if ans: st.write(ans)
+                        else: st.rerun()
         
         st.markdown("---")
         
@@ -898,20 +1144,23 @@ with tab6:
                 if st.button("📝 Draft Cover Letter"):
                     with st.spinner("Writing..."):
                         res_text = st.session_state.get('resume_text', "No resume uploaded.")
-                        cl = coach.generate_cover_letter(res_text, job_details_str)
-                        st.text_area("Cover Letter", cl, height=400)
+                        cl = safe_ai_execute(coach.generate_cover_letter, res_text, job_details_str)
+                        if cl: st.text_area("Cover Letter", cl, height=400)
+                        else: st.rerun()
             
             with c_a2:
                  if st.button("🎤 Interview Prep"):
                      with st.spinner("Preparing..."):
-                         q = coach.generate_interview_questions(job_details_str)
-                         st.markdown(q)
+                         q = safe_ai_execute(coach.generate_interview_questions, job_details_str)
+                         if q: st.markdown(q)
+                         else: st.rerun()
 
             with c_a3:
                 if st.button("👋 Cold Message"):
                      with st.spinner("Drafting..."):
-                         msg = coach.generate_cold_message(job_details_str)
-                         st.code(msg, language='text')
+                         msg = safe_ai_execute(coach.generate_cold_message, job_details_str)
+                         if msg: st.code(msg, language='text')
+                         else: st.rerun()
 
             with c_a4:
                 if st.button("📉 Missing Skills"):
@@ -920,8 +1169,9 @@ with tab6:
                          if len(res_text) < 50:
                              st.error("Please upload a resume first!")
                          else:
-                             advice = coach.get_advice(res_text, job_details_str)
-                             st.markdown(advice)
+                              advice = safe_ai_execute(coach.get_advice, res_text, job_details_str)
+                              if advice: st.markdown(advice)
+                              else: st.rerun()
 
 # Close session
 session.close()

@@ -22,7 +22,7 @@ except Exception as e:
 
 print("\nTrying to generate with 'gemini-1.5-flash'...")
 try:
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-2.0-flash")
     response = model.generate_content("Hello")
     print(f"Success! Response: {response.text}")
 except Exception as e:

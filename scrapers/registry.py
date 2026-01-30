@@ -98,16 +98,17 @@ def scrape_wrapper(scraper_class, *args):
     finally:
         session.close()
 
-def run_all_scrapers(legacy_session_ignored=None):
+def run_all_scrapers(legacy_session_ignored=None, progress_callback=None, cancel_event=None):
     """
     Runs all scrapers in parallel. 
     Ignores the passed session (if any) to enforce thread-safety with new sessions.
+    progress_callback: function(float) -> None. Receives 0.0 to 1.0 progress.
+    cancel_event: threading.Event. If set, stops the process.
     """
-    print(f"Starting parallel scrape with ~{len(TARGETS)+7} workers...")
+    total_tasks = 7 + len(TARGETS) # 7 standard + N targets
+    print(f"Starting parallel scrape with ~{total_tasks} workers...")
     
     # We use a large thread pool to run almost everything at once
-    # Since these are IO-bound net requests, more threads is fine
-    # Reduced workers slightly to prevent rate limits
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         futures = []
         
@@ -129,12 +130,27 @@ def run_all_scrapers(legacy_session_ignored=None):
             elif t['type'] == 'ashby':
                 futures.append(executor.submit(scrape_wrapper, AshbyScraper, t['id']))
         
-        # Wait for all with a decided timeout to prevent hanging forever
-        # 10 minutes max for all scrapers
-        done, not_done = concurrent.futures.wait(futures, timeout=600)
+        # Track progress
+        completed_count = 0
         
-        if not_done:
-            print(f"WARNING: {len(not_done)} scrapers did not finish in time!")
-            
-        print("All parallel scrapers finished (or timed out).")
+        # Iterate as they complete
+        try:
+            for future in concurrent.futures.as_completed(futures):
+                # CHECK CANCELLATION
+                if cancel_event and cancel_event.is_set():
+                    print("Scrape Cancelled by User.")
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    return # Exit immediately
+
+                completed_count += 1
+                if progress_callback:
+                    progress = min(1.0, completed_count / total_tasks)
+                    try:
+                        progress_callback(progress)
+                    except Exception:
+                        pass # Ignore UI errors
+        except Exception as e:
+            print(f"Error in scraping loop: {e}")
+        
+        print("All parallel scrapers finished.")
 

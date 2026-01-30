@@ -19,9 +19,11 @@ class AICoach:
         self.embedding_model = None
         self.llm_pipeline = None
         self.gemini_key = os.getenv("Google_token")
-        self.qwen_key = os.getenv("QWEN_token")
-        self.gemma_key = os.getenv("Gemma3b")
-        self.oss_key = os.getenv("OSS_token")
+        self.trinity_key = os.getenv("trinity-large-preview_token")
+        self.qwen_key = os.getenv("Qwen3_80b_token") 
+        self.gemma_key = os.getenv("Gemma3b_token")
+        self.gpt_oss_key = os.getenv("gpt-oss-120b_token")
+        self.claude_key = os.getenv("CLAUDE_API_KEY") # User checks if they have this
         self.device = "cpu" # Default until torch loads
 
     def set_gemini_key(self, key):
@@ -114,33 +116,45 @@ class AICoach:
         scored_jobs.sort(key=lambda x: x[1], reverse=True)
         return scored_jobs
 
-    def _get_best_model(self):
-        """Dynamically find the best available Gemini model."""
-        try:
-            # List all models
-            available_models = [m.name for m in genai.list_models()]
-            # Priority list (Updated for Speed/Stability)
-            # Prioritize 1.5 Flash (Fastest, highest limits)
-            priorities = [
-                'models/gemini-1.5-flash',
-                'models/gemini-1.5-pro',
-                'models/gemini-3-flash-preview',
-                'models/gemini-pro'
-            ]
+    def get_available_models(self):
+        """Returns a list of models available for selection."""
+        models = []
+        
+        # Gemini Models
+        if self.gemini_key:
+             # We can list the top priorities
+             models.append({"id": "models/gemini-2.5-flash", "name": "Gemini 2.5 Flash (Fast)", "provider": "gemini"})
+             models.append({"id": "models/gemini-2.0-flash", "name": "Gemini 2.0 Flash (Stable)", "provider": "gemini"})
+             models.append({"id": "models/gemini-1.5-flash", "name": "Gemini 1.5 Flash", "provider": "gemini"})
+             models.append({"id": "models/gemini-1.5-pro", "name": "Gemini 1.5 Pro (Brainy)", "provider": "gemini"})
+        
+        # OpenRouter Models
+        if self.trinity_key:
+            models.append({"id": "arcee-ai/trinity-large-preview:free", "name": "Trinity (OpenRouter)", "provider": "openrouter", "key": self.trinity_key})
+        
+        if self.qwen_key:
+            models.append({"id": "qwen/qwen3-next-80b-a3b-instruct:free", "name": "Qwen 3 80B (OpenRouter)", "provider": "openrouter", "key": self.qwen_key})
             
-            for p in priorities:
-                if p in available_models:
-                    return genai.GenerativeModel(p)
+        if self.gemma_key:
+            models.append({"id": "google/gemma-3-27b-it:free", "name": "Gemma 3 27B (OpenRouter)", "provider": "openrouter", "key": self.gemma_key})
             
-            # Fallback: find any generating model
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    return genai.GenerativeModel(m.name)
+        if self.gpt_oss_key:
+             # Assuming this maps to a specific model, or we use a generic free one if the key is valid
+             # "gpt-oss-120b" implies maybe "alpindale/goliath-120b" or similar? or just a custom name.
+             # Let's try a standard free "GPT-like" model on OpenRouter: Llama 3 or Mistral
+             models.append({"id": "meta-llama/llama-3-8b-instruct:free", "name": "Llama 3 8B (Free)", "provider": "openrouter", "key": self.gpt_oss_key})
+             models.append({"id": "microsoft/phi-3-mini-128k-instruct:free", "name": "Phi-3 Mini (Free)", "provider": "openrouter", "key": self.gpt_oss_key})
+        
+        if self.claude_key:
+             # Direct Anthropic
+             models.append({"id": "claude-3-opus-20240229", "name": "Claude 3 Opus", "provider": "anthropic"})
+             models.append({"id": "claude-3-sonnet-20240229", "name": "Claude 3 Sonnet", "provider": "anthropic"})
+             models.append({"id": "claude-3-haiku-20240307", "name": "Claude 3 Haiku", "provider": "anthropic"})
             
-            return None
-        except Exception as e:
-            print(f"Error listing models: {e}")
-            return None
+        # Local
+        models.append({"id": "local", "name": "Local LLM (LaMini)", "provider": "local"})
+        
+        return models
 
     def _call_openrouter(self, prompt, api_key, model_name):
         """Calls OpenRouter API for alternative models."""
@@ -150,10 +164,13 @@ class AICoach:
         import requests
         import json
         
+        # OpenRouter standard headers
         url = "https://openrouter.ai/api/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
+            "HTTP-Referer": "http://localhost:8501", # Localhost for testing
+            "X-Title": "Smart Job Portal",
         }
         data = {
             "model": model_name,
@@ -165,6 +182,10 @@ class AICoach:
             if response.status_code == 200:
                 result = response.json()
                 return result['choices'][0]['message']['content']
+            elif response.status_code == 401:
+                print(f"OpenRouter Auth Error ({model_name}): Check your API Key.")
+                st.toast(f"⚠️ Auth Error for {model_name}. Check .env key.")
+                return None
             else:
                 print(f"OpenRouter Error ({model_name}): {response.status_code} {response.text}")
                 return None
@@ -172,62 +193,57 @@ class AICoach:
             print(f"Request Error ({model_name}): {e}")
             return None
 
-    def _generate_with_fallback(self, prompt, label_override=None):
-        """Centralized logic to try Gemini -> Qwen -> Gemma -> Local."""
+    def generate_response(self, prompt, model_conf, label_override=None):
+        """Generates response using specific model config."""
+        if not model_conf:
+            return "Error: No Model Selected"
+            
+        provider = model_conf.get('provider')
+        model_id = model_conf.get('id')
+        label = label_override if label_override else f"AI Analysis ({model_conf.get('name')})"
         
-        # 1. Try Gemini
-        if self.gemini_key:
-            try:
-                genai.configure(api_key=self.gemini_key)
-                model = self._get_best_model()
-                if model:
-                    response = model.generate_content(prompt)
-                    # Check if response was successful and has text
-                    if response and hasattr(response, 'text'):
-                         label = label_override if label_override else f"Gemini Analysis ({model.model_name})"
-                         return f"**{label}:**\n\n{response.text}"
-                    else:
-                         print(f"Gemini response has no text or was blocked. Fallback triggered.")
-            except Exception as e:
-                # This catches 429 Quota Exceeded and other API errors
-                st.toast(f"⚠️ Gemini Quota/Error: Falling back to Qwen...")
-                print(f"Gemini Fallback Triggered (Error: {e})")
-
-        # 2. Try Qwen (OpenRouter)
-        if self.qwen_key:
-            res = self._call_openrouter(prompt, self.qwen_key, "qwen/qwen-2.5-72b-instruct")
+        if provider == 'gemini':
+            genai.configure(api_key=self.gemini_key)
+            model = genai.GenerativeModel(model_id)
+            response = model.generate_content(prompt)
+            if response and hasattr(response, 'text'):
+                return f"**{label}:**\n\n{response.text}"
+            else:
+                raise Exception("Gemini returned empty response")
+            
+        elif provider == 'openrouter':
+            key = model_conf.get('key')
+            res = self._call_openrouter(prompt, key, model_id)
             if res:
-                label = label_override if label_override else "Qwen Analysis"
                 return f"**{label}:**\n\n{res}"
             else:
-                st.toast(f"⚠️ Qwen failed. Falling back to Gemma...")
-
-        # 3. Try Gemma (OpenRouter)
-        if self.gemma_key:
-            res = self._call_openrouter(prompt, self.gemma_key, "google/gemma-2-9b-it")
-            if res:
-                label = label_override if label_override else "Gemma Analysis"
-                return f"**{label}:**\n\n{res}"
-            else:
-                st.toast(f"⚠️ Gemma failed. Falling back to GPT-OSS...")
-
-        # 4. Try GPT-OSS (OpenRouter)
-        if self.oss_key:
-            res = self._call_openrouter(prompt, self.oss_key, "openai/gpt-oss-120b:free")
-            if res:
-                label = label_override if label_override else "GPT-OSS Analysis"
-                return f"**{label}:**\n\n{res}"
-            else:
-                st.toast(f"⚠️ GPT-OSS failed. Falling back to Local AI...")
-
-        # 5. Fallback to Local
-        self.load_local_llm()
-        if self.llm_pipeline:
-            output = self.llm_pipeline(prompt, max_length=512, do_sample=True, temperature=0.7)
-            label = label_override if label_override else "Local AI Analysis"
-            return f"**{label}:**\n\n{output[0]['generated_text']}"
+                 raise Exception(f"OpenRouter ({model_id}) Failed")
         
-        return "No AI model available. Please check tokens in .env."
+        elif provider == 'anthropic':
+             # Requires: pip install anthropic
+             try:
+                 import anthropic
+                 client = anthropic.Anthropic(api_key=self.claude_key)
+                 message = client.messages.create(
+                    model=model_id,
+                    max_tokens=1000,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                 return f"**{label}:**\n\n{message.content[0].text}"
+             except ImportError:
+                 return "Error: `anthropic` library not installed."
+             except Exception as e:
+                 raise Exception(f"Claude Error: {e}")
+            
+        elif provider == 'local':
+            self.load_local_llm()
+            if self.llm_pipeline:
+                output = self.llm_pipeline(prompt, max_length=512, do_sample=True, temperature=0.7)
+                return f"**{label}:**\n\n{output[0]['generated_text']}"
+            else:
+                raise Exception("Local LLM failed to load")
+            
+        return "Invalid Model Selected"
 
     def get_advice(self, resume_text, job_description):
         """Centralized advice with fallback chain."""
@@ -248,7 +264,26 @@ class AICoach:
         **Tone:** Encouraging but realistic.
         Response:
         """
-        return self._generate_with_fallback(prompt)
+    def get_advice(self, resume_text, job_description, model_conf=None):
+        """Centralized advice with fallback chain."""
+        prompt = f"""
+        You are an expert AI Career Companion. Help the user land this job.
+        
+        **Target Job Description:**
+        {job_description[:4000]}
+        
+        **User's Resume:**
+        {resume_text[:4000]}
+        
+        **Task:**
+        1. Identify the top 3 critical skills missing from the resume.
+        2. Provide 1 specific, actionable piece of advice to improve their chances.
+        3. Rate their fit for this role on a scale of 1-10.
+        
+        **Tone:** Encouraging but realistic.
+        Response:
+        """
+        return self.generate_response(prompt, model_conf)
 
     def ask_coach(self, user_question, context=""):
         prompt = f"""
@@ -262,9 +297,21 @@ class AICoach:
         
         **Answer:**
         """
-        return self._generate_with_fallback(prompt)
+    def ask_coach(self, user_question, context="", model_conf=None):
+        prompt = f"""
+        You are a helpful AI Career Companion.
+        
+        **Context (Resume/Job Info):**
+        {context[:5000]}
+        
+        **User Question:**
+        {user_question}
+        
+        **Answer:**
+        """
+        return self.generate_response(prompt, model_conf)
 
-    def estimate_market_ranges(self, jobs_data):
+    def estimate_market_ranges(self, jobs_data, model_conf=None):
         """
         RAG-based Estimation:
         jobs_data: A list of dicts representing the raw job data from the user's database.
@@ -300,9 +347,9 @@ class AICoach:
         Markdown table: | Role Group | Companies Found | Estimated Range (USD) | Insight |
         """
         
-        return self._generate_with_fallback(prompt, label_override="AI Salary Analysis")
+        return self.generate_response(prompt, model_conf, label_override="AI Salary Analysis")
 
-    def market_insights_rag(self, user_query, jobs_data):
+    def market_insights_rag(self, user_query, jobs_data, model_conf=None):
         """
         RAG-based Market Intelligence: Answer questions using the job DB as context.
         jobs_data: List of dicts (title, company, location, etc.)
@@ -345,9 +392,9 @@ class AICoach:
         4. If the data doesn't support an answer, say so.
         """
         
-        return self._generate_with_fallback(prompt, label_override="Market AI Insight")
+        return self.generate_response(prompt, model_conf, label_override="Market AI Insight")
 
-    def global_skills_gap(self, resume_text, jobs_data):
+    def global_skills_gap(self, resume_text, jobs_data, model_conf=None):
         """
         Analyze the resume against the aggregate of the jobs list to find SYSTEMATIC gaps.
         """
@@ -399,9 +446,9 @@ class AICoach:
         ...
         """
         
-        return self._generate_with_fallback(prompt, label_override="Strategic Gap Analysis")
+        return self.generate_response(prompt, model_conf, label_override="Strategic Gap Analysis")
 
-    def generate_cover_letter(self, resume_text, job_details):
+    def generate_cover_letter(self, resume_text, job_details, model_conf=None):
         """Generates a tailored cover letter."""
         prompt = f"""
         You are an expert Resume Writer. Write a professional, compelling cover letter.
@@ -417,7 +464,7 @@ class AICoach:
         """
         return self.ask_coach(prompt)
 
-    def generate_interview_questions(self, job_details):
+    def generate_interview_questions(self, job_details, model_conf=None):
         """Generates tailored interview prep based on company style."""
         prompt = f"""
         You are an expert Technical Interview Coach. 
@@ -443,7 +490,7 @@ class AICoach:
         """
         return self.ask_coach(prompt)
 
-    def generate_cold_message(self, job_details):
+    def generate_cold_message(self, job_details, model_conf=None):
         """Generates a LinkedIn connection note."""
         prompt = f"""
         Write a 300-character LinkedIn connection request message to a recruiter at this company.
