@@ -5,3 +5,4 @@ __pycache__/
 *.xlsx
 token.json
 credentials.json
+link_db.txt
